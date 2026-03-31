@@ -11,6 +11,10 @@ __pycache__/
 venv/
 .venv/
 
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
 # AWS
 .aws/
 
