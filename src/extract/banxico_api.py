@@ -1,11 +1,16 @@
 """
-Extracción de datos desde la API SIE de Banxico.
-Deposita JSON crudo en la capa Bronze del data lake (S3).
+Extraction of data from Banxico SIE API.
+Deposits raw JSON into the Bronze layer of the data lake (S3).
 
 Series:
-    SF43718 — Tipo de cambio USD/MXN (Fix)
-    SF61745 — TIIE 28 días
-    SP1     — INPC inflación general
+    SF43718 — USD/MXN exchange rate (Fix)
+    SF61745 — TIIE 28-day rate
+    SP1     — INPC general inflation
+
+Secret management:
+    Local development : .env file via python-dotenv
+    Production (AWS)  : SSM Parameter Store for sensitive values (BANXICO_TOKEN)
+                        Glue Job parameters for non-sensitive config (BUCKET_NAME)
 """
 
 import json
@@ -15,6 +20,11 @@ from datetime import datetime, timedelta
 
 import boto3
 import requests
+from dotenv import load_dotenv
+
+# ─── Environment ──────────────────────────────────────────────────────────────
+
+load_dotenv()
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -25,43 +35,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Configuración ────────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
 
 BANXICO_BASE_URL = "https://www.banxico.org.mx/SieAPIRest/service/v1/series"
-BANXICO_TOKEN = os.environ.get("BANXICO_TOKEN", "")
+BANXICO_TOKEN    = os.getenv("BANXICO_TOKEN", "")
 
 SERIES = {
     "tipo_de_cambio": "SF43718",
-    "tiie_28": "SF61745",
-    "inpc": "SP1",
+    "tiie_28":        "SF61745",
+    "inpc":           "SP1",
 }
 
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "banxico-pipeline-dev-datalake")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+BUCKET_NAME = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
+AWS_REGION  = os.getenv("AWS_REGION", "us-east-1")
 
-# ─── Cliente S3 ───────────────────────────────────────────────────────────────
+# ─── AWS client ───────────────────────────────────────────────────────────────
 
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 
-# ─── Funciones ────────────────────────────────────────────────────────────────
-
+# ─── Functions ────────────────────────────────────────────────────────────────
 
 def get_date_range(days_back: int = 30) -> tuple[str, str]:
     """
-    Retorna rango de fechas en formato YYYY-MM-DD.
-    Por defecto los últimos 30 días.
+    Returns (start_date, end_date) as YYYY-MM-DD strings.
+    Both dates are inclusive in the Banxico API request.
     """
-    end_date = datetime.today()
+    end_date   = datetime.today()
     start_date = end_date - timedelta(days=days_back)
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
 def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
     """
-    Llama a la API de Banxico y retorna el JSON crudo.
+    Fetches a single series from Banxico SIE API and returns raw JSON.
+
+    Token is optional for short date ranges but required for full history.
+    In production, retrieve BANXICO_TOKEN from SSM Parameter Store
+    instead of environment variables.
     """
     url = f"{BANXICO_BASE_URL}/{serie_id}/datos/{start_date}/{end_date}"
 
+    # Banxico API works without a token but enforces strict rate limits.
+    # Always include token when available.
     headers = {"Bmx-Token": BANXICO_TOKEN} if BANXICO_TOKEN else {}
 
     logger.info(f"Fetching serie {serie_id} | {start_date} → {end_date}")
@@ -74,15 +89,18 @@ def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
 
 def build_s3_key(serie_name: str, serie_id: str, extraction_date: str) -> str:
     """
-    Construye la ruta en S3 con particionamiento por fecha.
+    Builds a Hive-style partitioned S3 path for the Bronze layer.
 
-    Ejemplo:
-        bronze/serie=tipo_de_cambio/year=2024/month=01/day=15/SF43718_20240115.json
+    Partitioning by serie/year/month/day enables Athena partition pruning,
+    which reduces scanned data volume and query cost on large date ranges.
+
+    Example:
+        bronze/serie=tipo_de_cambio/year=2026/month=03/day=30/SF43718_20260330.json
     """
-    dt = datetime.strptime(extraction_date, "%Y-%m-%d")
-    year = dt.strftime("%Y")
+    dt    = datetime.strptime(extraction_date, "%Y-%m-%d")
+    year  = dt.strftime("%Y")
     month = dt.strftime("%m")
-    day = dt.strftime("%d")
+    day   = dt.strftime("%d")
 
     return (
         f"bronze/"
@@ -94,15 +112,16 @@ def build_s3_key(serie_name: str, serie_id: str, extraction_date: str) -> str:
 
 def upload_to_s3(data: dict, s3_key: str) -> None:
     """
-    Sube JSON crudo a S3.
+    Serializes dict as UTF-8 JSON and uploads to S3 Bronze layer.
+    Preserves Spanish characters in Banxico response with ensure_ascii=False.
     """
     body = json.dumps(data, ensure_ascii=False, indent=2)
 
     s3_client.put_object(
-        Bucket=BUCKET_NAME,
-        Key=s3_key,
-        Body=body.encode("utf-8"),
-        ContentType="application/json",
+        Bucket      = BUCKET_NAME,
+        Key         = s3_key,
+        Body        = body.encode("utf-8"),
+        ContentType = "application/json",
     )
 
     logger.info(f"Uploaded → s3://{BUCKET_NAME}/{s3_key}")
@@ -110,22 +129,25 @@ def upload_to_s3(data: dict, s3_key: str) -> None:
 
 def extract_all(days_back: int = 30) -> None:
     """
-    Extrae todas las series y las deposita en Bronze.
+    Orchestrates extraction of all configured series into Bronze.
+
+    Processes series independently so a single failure does not block others.
+    Raises RuntimeError at the end if any series failed — this surfaces
+    as a Glue job failure and triggers the SNS alert pipeline.
     """
     start_date, end_date = get_date_range(days_back)
-    extraction_date = end_date
-
-    results = {"success": [], "failed": []}
+    extraction_date      = end_date
+    results              = {"success": [], "failed": []}
 
     for serie_name, serie_id in SERIES.items():
         try:
-            data = fetch_serie(serie_id, start_date, end_date)
+            data   = fetch_serie(serie_id, start_date, end_date)
             s3_key = build_s3_key(serie_name, serie_id, extraction_date)
             upload_to_s3(data, s3_key)
             results["success"].append(serie_name)
 
         except requests.HTTPError as e:
-            logger.error(f"HTTP error for {serie_id}: {e}")
+            logger.error(f"HTTP error fetching {serie_id}: {e}")
             results["failed"].append(serie_name)
 
         except Exception as e:
@@ -133,9 +155,12 @@ def extract_all(days_back: int = 30) -> None:
             results["failed"].append(serie_name)
 
     logger.info(
-        f"Extraction complete | success={results['success']} | failed={results['failed']}"
+        f"Extraction complete | "
+        f"success={results['success']} | "
+        f"failed={results['failed']}"
     )
 
+    # Raise after processing all series so partial successes are still uploaded.
     if results["failed"]:
         raise RuntimeError(f"Failed series: {results['failed']}")
 
