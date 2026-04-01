@@ -396,7 +396,7 @@ def upload_to_s3(payload: dict, s3_key: str) -> str:
 # ---------------------------------------------------------------------------
 
 def extract_all(
-    execution_date: datetime | None = None,
+    execution_date: datetime,
     data_month: datetime | None = None,
     mode: str = "daily",
 ) -> list[str]:
@@ -406,10 +406,10 @@ def extract_all(
 
     Parameters
     ----------
-    execution_date : datetime, optional
-        When the pipeline ran. Defaults to now (UTC).
-        Always reflects the actual wall-clock time of execution —
-        never the month being extracted during backfill.
+    execution_date : datetime
+        When the pipeline ran. Always passed by run_extract — never created internally.
+        Reflects the actual wall-clock time of execution, never the month
+        being extracted during backfill.
 
     data_month : datetime, optional
         Which period to extract data for. Defaults to execution_date.
@@ -426,8 +426,6 @@ def extract_all(
     list[str]
         Dataset names successfully uploaded to S3.
     """
-    if execution_date is None:
-        execution_date = datetime.now(tz=timezone.utc)
 
     # In daily mode data_month == execution_date.
     # In backfill mode data_month is the iteration month, execution_date is today.
@@ -482,12 +480,13 @@ def extract_all(
     return saved
 
 
-def run_backfill(start_date_str: str) -> None:
+def run_backfill(start_date_str: str, execution_date: datetime) -> None:
     """
     Extract full historical range iterating month by month.
 
-    execution_date is fixed to now — it reflects when the backfill ran.
-    data_month advances each iteration — it controls which month to extract.
+    execution_date is passed by run_extract and fixed for the entire backfill run —
+    all monthly iterations share the same execution_date so S3 paths are consistent.
+    data_month advances each iteration to control which calendar month to extract.
 
     This separation ensures execution_date in the S3 path always means
     "when the pipeline ran", never "what data is inside the file".
@@ -496,10 +495,13 @@ def run_backfill(start_date_str: str) -> None:
     ----------
     start_date_str : str
         Start date in YYYY-MM-DD format. Example: "2023-01-01"
+    execution_date : datetime
+        Wall-clock time when the pipeline started. Passed from run_extract
+        so all iterations of a backfill share the same execution_date.
 
     Usage
     -----
-        python3 src/extract/banxico_api.py --mode backfill --start-date 2023-01-01
+        python3 src/pipeline.py --mode backfill --start-date 2023-01-01
     """
     start = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end   = datetime.now(tz=timezone.utc) - timedelta(days=1)
@@ -509,9 +511,6 @@ def run_backfill(start_date_str: str) -> None:
             f"start_date ({format_date(start)}) must be before yesterday ({format_date(end)}). "
             f"Cannot backfill future dates."
         )
-
-    # Fixed for the entire backfill run — reflects when the pipeline ran.
-    execution_date = datetime.now(tz=timezone.utc)
 
     logger.info("Starting backfill | %s → %s", format_date(start), format_date(end))
 
@@ -533,20 +532,32 @@ def run_backfill(start_date_str: str) -> None:
 
     logger.info("Backfill complete.")
 
-def run_extract(mode: str, start_date: str | None):
+def run_extract(mode: str, start_date: str | None, execution_date: datetime | None = None) -> None:
     """
-    Orchestrate the extraction process based on the specified mode.
+    Public interface for pipeline orchestration.
+
+    Creates execution_date if not provided — this is the single point where
+    wall-clock time is captured for the entire pipeline run. Passing execution_date
+    explicitly allows pipeline.py to share the same timestamp across all steps.
+
+    Parameters
+    ----------
+    mode : str
+        'daily'    — extracts rolling window for all series.
+        'backfill' — extracts full historical range month by month.
+    start_date : str or None
+        Required when mode='backfill'. YYYY-MM-DD format.
+    execution_date : datetime, optional
+        When the pipeline started. Defaults to now (UTC) if not provided.
+        pipeline.py creates this once and passes it to all steps.
 
     Raises
     ------
-    ValueError               start_date is required when mode=backfill or start_date is in the future.
+    ValueError
+        If mode='backfill' and start_date is None.
+    ValueError
+        If start_date is after yesterday (future dates cannot be backfilled).
     """
-    if mode == "backfill":
-        if not start_date:
-            raise ValueError("--start-date is required when --mode=backfill")
-        run_backfill(start_date_str=start_date)
-    else:
-        extract_all()
 
 # ---------------------------------------------------------------------------
 # Entry point
