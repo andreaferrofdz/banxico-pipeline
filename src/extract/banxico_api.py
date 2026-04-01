@@ -21,8 +21,8 @@ Production (AWS)  : SSM Parameter Store for BANXICO_TOKEN
 
 Execution modes
 ---------------
-Daily (default) : extracts recent window per series (lookback_days)
-Backfill        : iterates month by month from start_date to yesterday
+Daily (default) : extracts rolling lookback window per series (lookback_days)
+Backfill        : single API call per series covering the full historical range
 
 Usage
 -----
@@ -155,7 +155,7 @@ def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
 def save_bronze_local(
     serie_id: str,
     frequency: str,
-    extraction_date: str,
+    partition_key: str,
     raw_data: dict,
 ) -> Path:
     """
@@ -168,7 +168,7 @@ def save_bronze_local(
         BRONZE_BASE
         / f"serie={serie_id}"
         / f"frequency={frequency}"
-        / f"extraction_date={extraction_date}"
+        / f"extraction_date={partition_key}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -185,7 +185,7 @@ def upload_to_s3(
     raw_data: dict,
     serie_id: str,
     frequency: str,
-    extraction_date: str,
+    partition_key: str,
 ) -> str:
     """
     Serialize and upload JSON directly to S3 from memory — no local file needed.
@@ -194,13 +194,17 @@ def upload_to_s3(
     to call in AWS Glue where the local filesystem is ephemeral and not
     guaranteed to persist between task attempts.
 
+    The partition_key distinguishes daily runs (YYYY-MM-DD) from backfill
+    loads (backfill_YYYY-MM-DD_YYYY-MM-DD), allowing Silver to apply
+    different processing logic per file type.
+
     Returns the full S3 URI of the uploaded object.
     """
     s3_key = (
         f"bronze/banxico/"
         f"serie={serie_id}/"
         f"frequency={frequency}/"
-        f"extraction_date={extraction_date}/"
+        f"extraction_date={partition_key}/"
         f"raw.json"
     )
 
@@ -241,7 +245,7 @@ def extract_all(execution_date: datetime | None = None) -> list[str]:
     if execution_date is None:
         execution_date = datetime.now(tz=timezone.utc)
 
-    extraction_date_str = format_date(execution_date)
+    partition_key    = format_date(execution_date)
     saved_series: list[str] = []
     errors: list[str] = []
 
@@ -263,10 +267,10 @@ def extract_all(execution_date: datetime | None = None) -> list[str]:
 
             # Always upload to S3 — primary storage.
             # Local save is optional, controlled by SAVE_LOCAL env variable.
-            upload_to_s3(raw_data, serie_id, frequency, extraction_date_str)
+            upload_to_s3(raw_data, serie_id, frequency, partition_key)
 
             if SAVE_LOCAL:
-                save_bronze_local(serie_id, frequency, extraction_date_str, raw_data)
+                save_bronze_local(serie_id, frequency, partition_key, raw_data)
 
             saved_series.append(serie_id)
 
@@ -287,11 +291,15 @@ def extract_all(execution_date: datetime | None = None) -> list[str]:
 
 def run_backfill(start_date_str: str) -> None:
     """
-    Extract full historical range from start_date to yesterday.
+    Extract full historical range in a single API call per series.
 
-    Iterates month by month to avoid Banxico API timeouts on large date ranges.
-    Each month is stored as a separate extraction_date partition in Bronze,
-    keeping the partition structure consistent with daily runs.
+    Banxico SIE API supports arbitrary date ranges — no need to iterate
+    month by month. One request per series covers the entire backfill window,
+    reducing 72 HTTP requests (3 series × 24 months) to just 3.
+
+    The partition key uses the format backfill_<start>_<end> so Silver
+    can distinguish backfill files from daily incremental files and apply
+    the appropriate processing logic.
 
     Parameters
     ----------
@@ -305,23 +313,44 @@ def run_backfill(start_date_str: str) -> None:
     start = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end   = datetime.now(tz=timezone.utc) - timedelta(days=1)
 
-    logger.info("Starting backfill | %s → %s", format_date(start), format_date(end))
+    start_date    = format_date(start)
+    end_date      = format_date(end)
+    partition_key = f"backfill_{start_date}_{end_date}"
 
-    current = start.replace(day=1)
-    while current <= end:
-        logger.info("Backfilling month: %s", format_date(current))
+    logger.info("Starting backfill | %s → %s", start_date, end_date)
 
-        # Pass the 1st of each month as execution_date so monthly series
-        # resolve correctly via get_last_closed_month_window.
-        extract_all(execution_date=current)
+    saved_series: list[str] = []
+    errors: list[str] = []
 
-        # Advance to the 1st of next month.
-        if current.month == 12:
-            current = current.replace(year=current.year + 1, month=1, day=1)
-        else:
-            current = current.replace(month=current.month + 1, day=1)
+    for serie_name, serie_info in SERIES.items():
+        serie_id  = serie_info["id"]
+        frequency = serie_info["frequency"]
 
-    logger.info("Backfill complete.")
+        try:
+            # Single API call covers the entire historical range.
+            # For monthly series, Banxico returns one row per month automatically.
+            raw_data = fetch_serie(serie_id, start_date, end_date)
+
+            upload_to_s3(raw_data, serie_id, frequency, partition_key)
+
+            if SAVE_LOCAL:
+                save_bronze_local(serie_id, frequency, partition_key, raw_data)
+
+            saved_series.append(serie_id)
+            logger.info("Backfill complete for %s (%s)", serie_name, serie_id)
+
+        except Exception as exc:  # noqa: BLE001
+            # Catch-all so one failing series never blocks the others from completing.
+            logger.error("Failed to backfill %s (%s): %s", serie_name, serie_id, exc)
+            errors.append(serie_name)
+
+    if errors:
+        raise RuntimeError(
+            f"Backfill completed with errors. Failed series: {errors}. "
+            f"Successfully uploaded: {len(saved_series)}/{len(SERIES)}"
+        )
+
+    logger.info("Backfill complete. %d series uploaded.", len(saved_series))
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +363,7 @@ if __name__ == "__main__":
         "--mode",
         choices=["daily", "backfill"],
         default="daily",
-        help="daily: extracts recent window per series. backfill: extracts full historical range.",
+        help="daily: extracts rolling window per series. backfill: single call per series for full history.",
     )
     parser.add_argument(
         "--start-date",
