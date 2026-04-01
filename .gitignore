@@ -25,3 +25,4 @@ data/*.parquet
 
 # OS
 .DS_Store
+data/
