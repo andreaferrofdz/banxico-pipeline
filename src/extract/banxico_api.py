@@ -533,6 +533,20 @@ def run_backfill(start_date_str: str) -> None:
 
     logger.info("Backfill complete.")
 
+def run_extract(mode: str, start_date: str | None):
+    """
+    Orchestrate the extraction process based on the specified mode.
+
+    Raises
+    ------
+    ValueError               start_date is required when mode=backfill or start_date is in the future.
+    """
+    if mode == "backfill":
+        if not start_date:
+            raise ValueError("--start-date is required when --mode=backfill")
+        run_backfill(start_date_str=start_date)
+    else:
+        extract_all()
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -544,19 +558,16 @@ if __name__ == "__main__":
         "--mode",
         choices=["daily", "backfill"],
         default="daily",
-        help="daily: extracts rolling window per series. backfill: iterates month by month.",
     )
     parser.add_argument(
         "--start-date",
         type=str,
         default=None,
-        help="Backfill start date in YYYY-MM-DD format. Required when --mode=backfill.",
     )
     args = parser.parse_args()
 
-    if args.mode == "backfill":
-        if not args.start_date:
-            parser.error("--start-date is required when --mode=backfill")
-        run_backfill(start_date_str=args.start_date)
-    else:
-        extract_all()
+    # Validation for CLI usage — pipeline.py validates before calling run_extract directly.
+    if args.mode == "backfill" and not args.start_date:
+        parser.error("--start-date is required when --mode=backfill")
+
+    run_extract(mode=args.mode, start_date=args.start_date)
