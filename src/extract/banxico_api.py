@@ -75,12 +75,7 @@ from pathlib import Path
 import boto3
 import requests
 from dotenv import load_dotenv
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -106,18 +101,18 @@ logger = logging.getLogger("banxico_extractor")
 # ---------------------------------------------------------------------------
 
 BANXICO_BASE_URL = "https://www.banxico.org.mx/SieAPIRest/service/v1/series"
-BANXICO_TOKEN    = os.getenv("BANXICO_TOKEN")
-BUCKET_NAME      = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
-AWS_REGION       = os.getenv("AWS_REGION", "us-east-1")
+BANXICO_TOKEN = os.getenv("BANXICO_TOKEN")
+BUCKET_NAME = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Save payload locally in addition to S3.
 # Useful for local debugging — disable in production (Glue has no persistent filesystem).
 SAVE_LOCAL = os.getenv("SAVE_LOCAL", "false").lower() == "true"
 
 SERIES: dict[str, dict] = {
-    "tipo_de_cambio": {"id": "SF43718", "frequency": "daily",   "lookback_days": 7},
-    "tiie_28":        {"id": "SF61745", "frequency": "daily",   "lookback_days": 7},
-    "inpc":           {"id": "SP1",     "frequency": "monthly"},
+    "tipo_de_cambio": {"id": "SF43718", "frequency": "daily", "lookback_days": 7},
+    "tiie_28": {"id": "SF61745", "frequency": "daily", "lookback_days": 7},
+    "inpc": {"id": "SP1", "frequency": "monthly"},
 }
 
 BRONZE_BASE = Path("data/bronze")
@@ -132,6 +127,7 @@ s3_client = boto3.client("s3", region_name=AWS_REGION)
 # Date helpers
 # ---------------------------------------------------------------------------
 
+
 def format_date(date: datetime) -> str:
     return date.strftime("%Y-%m-%d")
 
@@ -142,7 +138,7 @@ def get_daily_window(data_month: datetime, lookback_days: int = 7) -> tuple[str,
     Window ends yesterday to ensure the trading day is fully closed
     before extraction — same-day data from Banxico may be incomplete.
     """
-    end_date   = data_month - timedelta(days=1)
+    end_date = data_month - timedelta(days=1)
     start_date = end_date - timedelta(days=lookback_days - 1)
     return format_date(start_date), format_date(end_date)
 
@@ -172,8 +168,8 @@ def get_last_closed_month_window(data_month: datetime) -> tuple[str, str]:
     month so SP1 (INPC) is guaranteed to be published before extraction.
     INPC is typically released 10-15 days after month-end.
     """
-    first_of_current  = data_month.replace(day=1)
-    last_of_previous  = first_of_current - timedelta(days=1)
+    first_of_current = data_month.replace(day=1)
+    last_of_previous = first_of_current - timedelta(days=1)
     first_of_previous = last_of_previous.replace(day=1)
     return format_date(first_of_previous), format_date(last_of_previous)
 
@@ -208,6 +204,7 @@ def resolve_window(
 # ---------------------------------------------------------------------------
 # API client
 # ---------------------------------------------------------------------------
+
 
 def _is_retryable(exc: BaseException) -> bool:
     """Return True only for transient failures worth retrying.
@@ -245,7 +242,7 @@ def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
     requests.Timeout         after retries if request times out.
     requests.ConnectionError after retries if connection fails.
     """
-    url     = f"{BANXICO_BASE_URL}/{serie_id}/datos/{start_date}/{end_date}"
+    url = f"{BANXICO_BASE_URL}/{serie_id}/datos/{start_date}/{end_date}"
 
     # Banxico API works without a token but rate-limits aggressively.
     # Always include token when available.
@@ -261,6 +258,7 @@ def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
 # ---------------------------------------------------------------------------
 # Payload builder
 # ---------------------------------------------------------------------------
+
 
 def build_payload(
     raw_data: dict,
@@ -281,14 +279,14 @@ def build_payload(
     """
     return {
         "metadata": {
-            "source":           "banxico",
-            "dataset":          dataset,
-            "serie_id":         serie_id,
-            "extraction_type":  extraction_type,
-            "execution_date":   execution_date,
-            "execution_ts":     execution_ts,
-            "start_date":       start_date,
-            "end_date":         end_date,
+            "source": "banxico",
+            "dataset": dataset,
+            "serie_id": serie_id,
+            "extraction_type": extraction_type,
+            "execution_date": execution_date,
+            "execution_ts": execution_ts,
+            "start_date": start_date,
+            "end_date": end_date,
         },
         "data": raw_data,
     }
@@ -297,6 +295,7 @@ def build_payload(
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
+
 
 def build_s3_key(
     dataset: str,
@@ -380,10 +379,10 @@ def upload_to_s3(payload: dict, s3_key: str) -> str:
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
     s3_client.put_object(
-        Bucket      = BUCKET_NAME,
-        Key         = s3_key,
-        Body        = body,
-        ContentType = "application/json",
+        Bucket=BUCKET_NAME,
+        Key=s3_key,
+        Body=body,
+        ContentType="application/json",
     )
 
     s3_uri = f"s3://{BUCKET_NAME}/{s3_key}"
@@ -394,6 +393,7 @@ def upload_to_s3(payload: dict, s3_key: str) -> str:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
 
 def extract_all(
     execution_date: datetime,
@@ -433,9 +433,9 @@ def extract_all(
         data_month = execution_date
 
     execution_date_str = format_date(execution_date)
-    execution_ts_str   = execution_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-    saved: list[str]   = []
-    errors: list[str]  = []
+    execution_ts_str = execution_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    saved: list[str] = []
+    errors: list[str] = []
 
     for dataset, serie_info in SERIES.items():
         serie_id = serie_info["id"]
@@ -446,21 +446,25 @@ def extract_all(
             raw_data = fetch_serie(serie_id, start_date, end_date)
 
             payload = build_payload(
-                raw_data        = raw_data,
-                dataset         = dataset,
-                serie_id        = serie_id,
-                extraction_type = mode,
-                execution_date  = execution_date_str,
-                execution_ts    = execution_ts_str,
-                start_date      = start_date,
-                end_date        = end_date,
+                raw_data=raw_data,
+                dataset=dataset,
+                serie_id=serie_id,
+                extraction_type=mode,
+                execution_date=execution_date_str,
+                execution_ts=execution_ts_str,
+                start_date=start_date,
+                end_date=end_date,
             )
 
-            s3_key = build_s3_key(dataset, mode, execution_date_str, start_date, end_date)
+            s3_key = build_s3_key(
+                dataset, mode, execution_date_str, start_date, end_date
+            )
             upload_to_s3(payload, s3_key)
 
             if SAVE_LOCAL:
-                local_path = build_local_path(dataset, mode, execution_date_str, start_date, end_date)
+                local_path = build_local_path(
+                    dataset, mode, execution_date_str, start_date, end_date
+                )
                 save_local(payload, local_path)
 
             saved.append(dataset)
@@ -504,7 +508,7 @@ def run_backfill(start_date_str: str, execution_date: datetime) -> None:
         python3 src/pipeline.py --mode backfill --start-date 2023-01-01
     """
     start = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end   = datetime.now(tz=timezone.utc) - timedelta(days=1)
+    end = datetime.now(tz=timezone.utc) - timedelta(days=1)
 
     if start > end:
         raise ValueError(
@@ -519,9 +523,9 @@ def run_backfill(start_date_str: str, execution_date: datetime) -> None:
         logger.info("Backfilling month: %s", format_date(data_month))
 
         extract_all(
-            execution_date = execution_date,
-            data_month     = data_month,
-            mode           = "backfill",
+            execution_date=execution_date,
+            data_month=data_month,
+            mode="backfill",
         )
 
         # Advance to the 1st of next month.
@@ -532,7 +536,10 @@ def run_backfill(start_date_str: str, execution_date: datetime) -> None:
 
     logger.info("Backfill complete.")
 
-def run_extract(mode: str, start_date: str | None, execution_date: datetime | None = None) -> None:
+
+def run_extract(
+    mode: str, start_date: str | None, execution_date: datetime | None = None
+) -> None:
     """
     Public interface for pipeline orchestration.
 
@@ -568,6 +575,7 @@ def run_extract(mode: str, start_date: str | None, execution_date: datetime | No
     else:
         extract_all(execution_date)
 
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -586,8 +594,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Validation for CLI usage — pipeline.py validates before calling run_extract directly.
-    if args.mode == "backfill" and not args.start_date:
-        parser.error("--start-date is required when --mode=backfill")
-
-    run_extract(mode=args.mode, start_date=args.start_date)
+    try:
+        run_extract(mode=args.mode, start_date=args.start_date)
+    except ValueError as exc:
+        parser.error(str(exc))
