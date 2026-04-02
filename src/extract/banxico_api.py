@@ -558,6 +558,15 @@ def run_extract(mode: str, start_date: str | None, execution_date: datetime | No
     ValueError
         If start_date is after yesterday (future dates cannot be backfilled).
     """
+    if execution_date is None:
+        execution_date = datetime.now(tz=timezone.utc)
+
+    if mode == "backfill":
+        if not start_date:
+            raise ValueError("--start-date is required when --mode=backfill")
+        run_backfill(start_date, execution_date)
+    else:
+        extract_all(execution_date)
 
 # ---------------------------------------------------------------------------
 # Entry point
