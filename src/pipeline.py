@@ -1,11 +1,29 @@
+"""
+Banxico Data Pipeline — Orchestrator
+======================================
+Coordinates the full pipeline execution: extract → silver → gold → quality.
+
+Steps run sequentially. If any step raises an exception the pipeline stops
+immediately, logs which step failed, and re-raises so Glue marks the job
+as failed and SNS triggers the alert.
+
+execution_date is created once and passed to all steps so S3 partition keys
+are consistent across Bronze, Silver and Gold within a single pipeline run.
+
+Usage
+-----
+Daily   : python3 src/pipeline.py
+Backfill: python3 src/pipeline.py --mode backfill --start-date 2023-01-01
+"""
+
 import argparse
 import logging
 import time
 from datetime import datetime, timezone
 
 from extract import run_extract
-# from quality import run_quality          # TODO: uncomment when implemented
-# from transform import run_gold, run_silver  # TODO: uncomment when implemented
+# from transform import run_silver, run_gold  # TODO: uncomment when implemented
+# from quality import run_quality              # TODO: uncomment when implemented
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -18,6 +36,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pipeline_orchestration")
 
+# ---------------------------------------------------------------------------
+# Pipeline steps
+# ---------------------------------------------------------------------------
 
 def run_step_extract(
     mode: str, start_date: str | None, execution_date: datetime
@@ -38,12 +59,7 @@ def run_step_extract(
         Wall-clock time when the pipeline started. Shared across all steps
         so Bronze, Silver and Gold partitions are consistent within a run.
     """
-    logger.info("Step 1/4: extract → started")
-    start = time.perf_counter()
-
     run_extract(mode, start_date, execution_date)
-
-    logger.info("Step 1/4: extract → completed in %.1fs", time.perf_counter() - start)
 
 
 def run_step_silver(
@@ -55,7 +71,7 @@ def run_step_silver(
     Reads Bronze JSON payloads, applies cleaning and type casting,
     deduplicates by (serie_id, date), and writes Parquet to Silver.
 
-    Not yet implemented — placeholder logs skipped and returns.
+    Not yet implemented — placeholder returns without action.
 
     Parameters
     ----------
@@ -66,8 +82,8 @@ def run_step_silver(
     execution_date : datetime
         Wall-clock time when the pipeline started.
     """
-    logger.info("Step 2/4: silver → skipped (not implemented)")
     # TODO: implement when silver.py is ready
+    pass
 
 
 def run_step_gold(
@@ -79,7 +95,7 @@ def run_step_gold(
     Reads Silver Parquet, applies business-level aggregations and joins
     across series, and writes the final dataset consumed by Tableau Public.
 
-    Not yet implemented — placeholder logs skipped and returns.
+    Not yet implemented — placeholder returns without action.
 
     Parameters
     ----------
@@ -90,8 +106,8 @@ def run_step_gold(
     execution_date : datetime
         Wall-clock time when the pipeline started.
     """
-    logger.info("Step 3/4: gold → skipped (not implemented)")
     # TODO: implement when gold.py is ready
+    pass
 
 
 def run_step_quality(
@@ -104,7 +120,7 @@ def run_step_quality(
     an SNS alert if any expectation fails. Runs last because Gold is
     the consumer-facing layer — Silver issues surface as Gold failures.
 
-    Not yet implemented — placeholder logs skipped and returns.
+    Not yet implemented — placeholder returns without action.
 
     Parameters
     ----------
@@ -115,9 +131,13 @@ def run_step_quality(
     execution_date : datetime
         Wall-clock time when the pipeline started.
     """
-    logger.info("Step 4/4: quality → skipped (not implemented)")
     # TODO: implement when quality.py is ready
+    pass
 
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
 def run_pipeline(
     mode: str, start_date: str | None, execution_date: datetime
@@ -125,8 +145,10 @@ def run_pipeline(
     """
     Orchestrate the full Banxico pipeline: extract → silver → gold → quality.
 
-    Steps run sequentially. If any step raises an exception the pipeline
-    stops immediately — subsequent steps are not executed.
+    Steps run sequentially. Logging and timing are centralized in the loop —
+    step functions contain only business logic. If any step raises an exception
+    the pipeline logs which step failed and re-raises — Glue marks the job as
+    failed and SNS triggers the alert.
 
     execution_date is created once in the entry point and passed to all steps
     so S3 partition keys are consistent across Bronze, Silver and Gold
@@ -143,15 +165,48 @@ def run_pipeline(
         Wall-clock time when the pipeline started. Created once in __main__
         and shared across all steps.
     """
-    logger.info("Pipeline started | mode=%s | start_date=%s", mode, start_date or "N/A")
-    start = time.perf_counter()
+    logger.info(
+        "Pipeline started | mode=%s | start_date=%s",
+        mode,
+        start_date or "N/A",
+    )
+    pipeline_start = time.perf_counter()
 
-    run_step_extract(mode, start_date, execution_date)
-    run_step_silver(mode, start_date, execution_date)
-    run_step_gold(mode, start_date, execution_date)
-    run_step_quality(mode, start_date, execution_date)
+    steps = [
+        ("1/4", "extract", run_step_extract),
+        ("2/4", "silver",  run_step_silver),
+        ("3/4", "gold",    run_step_gold),
+        ("4/4", "quality", run_step_quality),
+    ]
 
-    logger.info("Pipeline completed in %.1fs", time.perf_counter() - start)
+    for step_num, step_name, step_fn in steps:
+        logger.info("Step %s: %s → started", step_num, step_name)
+        step_start = time.perf_counter()
+
+        try:
+            step_fn(mode, start_date, execution_date)
+        except Exception as exc:
+            # Log the failing step before re-raising so CloudWatch and Glue
+            # logs show exactly where the pipeline broke.
+            logger.error(
+                "Pipeline failed at step '%s' after %.1fs | error: %s",
+                step_name,
+                time.perf_counter() - pipeline_start,
+                exc,
+            )
+            raise
+
+        logger.info(
+            "Step %s: %s → completed in %.1fs",
+            step_num,
+            step_name,
+            time.perf_counter() - step_start,
+        )
+
+    logger.info(
+        "Pipeline completed in %.1fs",
+        time.perf_counter() - pipeline_start,
+    )
 
 
 # ---------------------------------------------------------------------------
