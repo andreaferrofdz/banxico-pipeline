@@ -50,7 +50,7 @@ they indicate configuration issues, not transient failures.
 Series ingested
 ---------------
 - SF43718 : USD/MXN FIX exchange rate  (daily)
-- SF61745 : TIIE 28-day interest rate  (daily)
+- SF60648 : TIIE 28-day interest rate  (daily)
 - SP1     : INPC consumer price index  (monthly)
 
 Secret management
@@ -107,7 +107,7 @@ SAVE_LOCAL = os.getenv("SAVE_LOCAL", "false").lower() == "true"
 
 SERIES: dict[str, dict] = {
     "tipo_de_cambio": {"id": "SF43718", "frequency": "daily", "lookback_days": 7},
-    "tiie_28": {"id": "SF61745", "frequency": "daily", "lookback_days": 7},
+    "tiie_28": {"id": "SF60648", "frequency": "daily", "lookback_days": 7},
     "inpc": {"id": "SP1", "frequency": "monthly"},
 }
 
