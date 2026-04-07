@@ -81,8 +81,6 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 # Environment
 # ---------------------------------------------------------------------------
 
-# load_dotenv() is a no-op when variables are already present in the environment
-# (Glue, Lambda), so this is safe to call without guards.
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -105,8 +103,6 @@ BANXICO_TOKEN = os.getenv("BANXICO_TOKEN")
 BUCKET_NAME = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Save payload locally in addition to S3.
-# Useful for local debugging — disable in production (Glue has no persistent filesystem).
 SAVE_LOCAL = os.getenv("SAVE_LOCAL", "false").lower() == "true"
 
 SERIES: dict[str, dict] = {
@@ -244,8 +240,6 @@ def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
     """
     url = f"{BANXICO_BASE_URL}/{serie_id}/datos/{start_date}/{end_date}"
 
-    # Banxico API works without a token but rate-limits aggressively.
-    # Always include token when available.
     headers = {"Bmx-Token": BANXICO_TOKEN} if BANXICO_TOKEN else {}
 
     logger.info("Fetching %s | %s → %s", serie_id, start_date, end_date)
@@ -327,8 +321,6 @@ def build_s3_key(
     )
 
     if extraction_type == "backfill":
-        # Hive-style range partitions prevent collisions when multiple
-        # backfills run on the same execution_date with different ranges.
         base += f"range_start={start_date}/range_end={end_date}/"
 
     return base + "payload.json"
@@ -361,7 +353,6 @@ def save_local(payload: dict, local_path: Path) -> None:
     """
     local_path.parent.mkdir(parents=True, exist_ok=True)
     with open(local_path, "w", encoding="utf-8") as f:
-        # ensure_ascii=False preserves Spanish characters in Banxico responses.
         json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info("Saved locally → %s", local_path)
 
@@ -427,8 +418,6 @@ def extract_all(
         Dataset names successfully uploaded to S3.
     """
 
-    # In daily mode data_month == execution_date.
-    # In backfill mode data_month is the iteration month, execution_date is today.
     if data_month is None:
         data_month = execution_date
 
@@ -469,8 +458,7 @@ def extract_all(
 
             saved.append(dataset)
 
-        except Exception as exc:  # noqa: BLE001
-            # Catch-all so one failing series never blocks the others from completing.
+        except Exception as exc:
             logger.error("Failed to extract %s (%s): %s", dataset, serie_id, exc)
             errors.append(dataset)
 
@@ -528,7 +516,6 @@ def run_backfill(start_date_str: str, execution_date: datetime) -> None:
             mode="backfill",
         )
 
-        # Advance to the 1st of next month.
         if data_month.month == 12:
             data_month = data_month.replace(year=data_month.year + 1, month=1, day=1)
         else:
