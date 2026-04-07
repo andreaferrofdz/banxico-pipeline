@@ -1,5 +1,5 @@
 """
-Pipeline State — Checkpoint Store
+Checkpoint Store
 ===================================
 Manages per-dataset processing state for the Silver layer.
 
@@ -27,6 +27,7 @@ Usage
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -37,15 +38,24 @@ from dotenv import load_dotenv
 # Environment
 # ---------------------------------------------------------------------------
 
-# load_dotenv() is a no-op when variables are already present in the environment
-# (Glue, Lambda), so this is safe to call without guards.
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("checkpoints")
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-AWS_REGION  = os.getenv("AWS_REGION",  "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 BUCKET_NAME = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
 
 # ---------------------------------------------------------------------------
@@ -58,6 +68,7 @@ s3_client = boto3.client("s3", region_name=AWS_REGION)
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def get_checkpoint_key(dataset: str) -> str:
     """
     Build the S3 key for a dataset's checkpoint file.
@@ -67,9 +78,11 @@ def get_checkpoint_key(dataset: str) -> str:
     """
     return f"silver/source=banxico/_checkpoints/{dataset}.json"
 
+
 # ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
+
 
 def read_checkpoint(dataset: str) -> str | None:
     """
@@ -93,11 +106,19 @@ def read_checkpoint(dataset: str) -> str | None:
 
     try:
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-        content  = response["Body"].read().decode("utf-8")
-        data     = json.loads(content)
-        return data.get("last_processed_execution_date")
+        content = response["Body"].read().decode("utf-8")
+        data = json.loads(content)
+        last_processed_execution_date = data.get("last_processed_execution_date")
+
+        logger.info(
+            "Checkpoint read | dataset=%s | last_processed=%s",
+            dataset,
+            last_processed_execution_date,
+        )
+
+        return last_processed_execution_date
+
     except s3_client.exceptions.NoSuchKey:
-        # First run — no checkpoint exists yet.
         return None
 
 
@@ -118,16 +139,20 @@ def write_checkpoint(dataset: str, execution_date: str) -> None:
     s3_key = get_checkpoint_key(dataset)
 
     payload = {
-        "dataset":                       dataset,
+        "dataset": dataset,
         "last_processed_execution_date": execution_date,
-        "updated_at":                    datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     s3_client.put_object(
-        Bucket      = BUCKET_NAME,
-        Key         = s3_key,
-        Body        = json.dumps(payload, indent=2).encode("utf-8"),
-        ContentType = "application/json",
+        Bucket=BUCKET_NAME,
+        Key=s3_key,
+        Body=json.dumps(payload, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+    logger.info(
+        "Checkpoint written | dataset=%s | execution_date=%s", dataset, execution_date
     )
 
 
@@ -145,3 +170,5 @@ def delete_checkpoint(dataset: str) -> None:
     """
     s3_key = get_checkpoint_key(dataset)
     s3_client.delete_object(Bucket=BUCKET_NAME, Key=s3_key)
+
+    logger.info("Checkpoint deleted | dataset=%s", dataset)
