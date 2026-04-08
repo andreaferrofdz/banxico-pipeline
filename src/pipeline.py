@@ -22,7 +22,8 @@ import time
 from datetime import datetime, timezone
 
 from extract import run_extract
-# from transform import run_silver, run_gold  # TODO: uncomment when implemented
+from transform import run_silver  # , run_gold  # TODO: uncomment when implemented
+
 # from quality import run_quality              # TODO: uncomment when implemented
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ logger = logging.getLogger("pipeline_orchestration")
 # ---------------------------------------------------------------------------
 # Pipeline steps
 # ---------------------------------------------------------------------------
+
 
 def run_step_extract(
     mode: str, start_date: str | None, execution_date: datetime
@@ -71,8 +73,6 @@ def run_step_silver(
     Reads Bronze JSON payloads, applies cleaning and type casting,
     deduplicates by (serie_id, date), and writes Parquet to Silver.
 
-    Not yet implemented — placeholder returns without action.
-
     Parameters
     ----------
     mode : str
@@ -82,13 +82,10 @@ def run_step_silver(
     execution_date : datetime
         Wall-clock time when the pipeline started.
     """
-    # TODO: implement when silver.py is ready
-    pass
+    run_silver(mode, start_date, execution_date)
 
 
-def run_step_gold(
-    mode: str, start_date: str | None, execution_date: datetime
-) -> None:
+def run_step_gold(mode: str, start_date: str | None, execution_date: datetime) -> None:
     """
     Execute the Gold aggregation step.
 
@@ -139,9 +136,8 @@ def run_step_quality(
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def run_pipeline(
-    mode: str, start_date: str | None, execution_date: datetime
-) -> None:
+
+def run_pipeline(mode: str, start_date: str | None, execution_date: datetime) -> None:
     """
     Orchestrate the full Banxico pipeline: extract → silver → gold → quality.
 
@@ -174,8 +170,8 @@ def run_pipeline(
 
     steps = [
         ("1/4", "extract", run_step_extract),
-        ("2/4", "silver",  run_step_silver),
-        ("3/4", "gold",    run_step_gold),
+        ("2/4", "silver", run_step_silver),
+        ("3/4", "gold", run_step_gold),
         ("4/4", "quality", run_step_quality),
     ]
 
