@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 import boto3
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
 
 from checkpoints import read_checkpoint, write_checkpoint
@@ -253,9 +255,27 @@ def write_silver_parquet(
 
     partitions = df.groupby(["year", "month"])
 
+    schema = pa.schema([
+        pa.field("date",         pa.date32()),
+        pa.field("source",       pa.string()),
+        pa.field("dataset",      pa.string()),
+        pa.field("serie_id",     pa.string()),
+        pa.field("processed_at", pa.string()),
+        pa.field("value",        pa.float64()),
+        pa.field("title",        pa.string()),
+    ])
+
     for (year, month), partition_df in partitions:
-        # Drop helper columns before writing — year/month live in the S3 path.
         partition_df = partition_df.drop(columns=["year", "month"])
+
+        partition_df = partition_df.copy()
+        partition_df["date"] = partition_df["date"].dt.date
+
+        table = pa.Table.from_pandas(partition_df, schema=schema, preserve_index=False)
+
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer, compression="snappy")
+        buffer.seek(0)
 
         s3_key = (
             f"silver/source=banxico/"
@@ -264,12 +284,6 @@ def write_silver_parquet(
             f"month={month}/"
             f"data.parquet"
         )
-
-        buffer = io.BytesIO()
-        partition_df.to_parquet(
-            buffer, index=False, engine="pyarrow", compression="snappy"
-        )
-        buffer.seek(0)
 
         s3_client.put_object(
             Bucket=BUCKET_NAME,
@@ -314,7 +328,6 @@ def process_dataset_to_silver(
     Parameters
     ----------
     dataset        : Dataset name. Example: "tipo_de_cambio".
-    mode           : "daily" or "backfill".
     file_list      : S3 keys of Bronze files to process.
     execution_date : Wall-clock time when the pipeline started.
     """
@@ -346,8 +359,6 @@ def run_silver(mode: str, execution_date: datetime) -> None:
     Parameters
     ----------
     mode           : "daily" or "backfill".
-    start_date     : Backfill start date in YYYY-MM-DD format. Not used for listing —
-                     Bronze files are scoped by execution_date.
     execution_date : Wall-clock time when the pipeline started.
     """
     execution_date_str = execution_date.strftime("%Y-%m-%d")
