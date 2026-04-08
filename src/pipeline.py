@@ -82,7 +82,7 @@ def run_step_silver(
     execution_date : datetime
         Wall-clock time when the pipeline started.
     """
-    run_silver(mode, start_date, execution_date)
+    run_silver(mode, execution_date)
 
 
 def run_step_gold(mode: str, start_date: str | None, execution_date: datetime) -> None:

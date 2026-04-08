@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import os
@@ -32,12 +33,12 @@ logger = logging.getLogger("silver")
 # ---------------------------------------------------------------------------
 
 BUCKET_NAME = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
-AWS_REGION  = os.getenv("AWS_REGION",  "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 SERIES = {
     "tipo_de_cambio": {"id": "SF43718", "frequency": "daily"},
-    "tiie_28":        {"id": "SF60648", "frequency": "daily"},
-    "inpc":           {"id": "SP1",     "frequency": "monthly"},
+    "tiie_28": {"id": "SF60648", "frequency": "daily"},
+    "inpc": {"id": "SP1", "frequency": "monthly"},
 }
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ s3_client = boto3.client("s3", region_name=AWS_REGION)
 # ---------------------------------------------------------------------------
 # Extract helpers
 # ---------------------------------------------------------------------------
+
 
 def list_bronze_files(
     dataset: str,
@@ -78,13 +80,13 @@ def list_bronze_files(
     base = f"bronze/source=banxico/dataset={dataset}/extraction_type={mode}"
 
     if mode == "backfill":
-        prefix      = f"{base}/execution_date={execution_date}"
+        prefix = f"{base}/execution_date={execution_date}"
         start_after = ""
     else:
-        prefix      = base
+        prefix = base
         start_after = f"{base}/execution_date={after_date}"
 
-    files              = []
+    files = []
     continuation_token = None
 
     while True:
@@ -108,7 +110,7 @@ def list_bronze_files(
 def read_bronze_payload(s3_key: str) -> dict:
     """Read a Bronze payload from S3 and return the full dict (metadata + data)."""
     response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-    content  = response["Body"].read().decode("utf-8")
+    content = response["Body"].read().decode("utf-8")
     return json.loads(content)
 
 
@@ -122,7 +124,7 @@ def parse_bronze_records(payload: dict) -> pd.DataFrame:
     Returns an empty DataFrame if the payload contains no data — caller
     decides whether to skip or raise.
     """
-    series   = payload.get("data", {}).get("bmx", {}).get("series", [])
+    series = payload.get("data", {}).get("bmx", {}).get("series", [])
     metadata = payload.get("metadata", {})
 
     if not series or "datos" not in series[0]:
@@ -138,15 +140,17 @@ def parse_bronze_records(payload: dict) -> pd.DataFrame:
 
     for serie in series:
         for d in serie.get("datos", []):
-            rows.append({
-                "fecha":        d["fecha"],
-                "dato":         d["dato"],
-                "titulo":       serie["titulo"],
-                "source":       metadata["source"],
-                "dataset":      metadata["dataset"],
-                "serie_id":     metadata["serie_id"],
-                "processed_at": processed_at,
-            })
+            rows.append(
+                {
+                    "fecha": d["fecha"],
+                    "dato": d["dato"],
+                    "titulo": serie["titulo"],
+                    "source": metadata["source"],
+                    "dataset": metadata["dataset"],
+                    "serie_id": metadata["serie_id"],
+                    "processed_at": processed_at,
+                }
+            )
 
     return pd.DataFrame(rows)
 
@@ -154,6 +158,7 @@ def parse_bronze_records(payload: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
+
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -166,17 +171,21 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    df["fecha"]  = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
-    df["dato"]   = pd.to_numeric(df["dato"], errors="coerce")
+    df["fecha"] = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
+    df["dato"] = pd.to_numeric(df["dato"], errors="coerce")
     df["titulo"] = df["titulo"].str.strip().apply(lambda x: re.sub(r"\s+", " ", x))
 
-    df = df.rename(columns={
-        "fecha":  "date",
-        "dato":   "value",
-        "titulo": "title",
-    })
+    df = df.rename(
+        columns={
+            "fecha": "date",
+            "dato": "value",
+            "titulo": "title",
+        }
+    )
 
-    return df[["date", "source", "dataset", "serie_id", "processed_at", "value", "title"]]
+    return df[
+        ["date", "source", "dataset", "serie_id", "processed_at", "value", "title"]
+    ]
 
 
 def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
@@ -192,7 +201,7 @@ def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
 
     for s3_key in file_list:
         payload = read_bronze_payload(s3_key)
-        raw_df  = parse_bronze_records(payload)
+        raw_df = parse_bronze_records(payload)
 
         if raw_df.empty:
             logger.warning("No data in payload | %s | skipping", s3_key)
@@ -211,13 +220,88 @@ def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
+def write_silver_parquet(
+    df: pd.DataFrame,
+    dataset: str,
+    execution_date: datetime,
+) -> None:
+    """
+    Write a Silver DataFrame to S3 as Parquet, partitioned by year and month of the data.
+
+    Partitions by business date (year/month of the data records), not by pipeline
+    execution_date — Silver partitions represent when the data occurred, not when
+    the pipeline ran. This enables efficient Athena partition pruning on date ranges.
+
+    Each partition is overwritten on every run — idempotent by design. If Silver
+    already has data for year=2024/month=01, it is replaced with the latest version.
+
+    Partition structure:
+        silver/source=banxico/dataset=<name>/year=<YYYY>/month=<MM>/data.parquet
+
+    Parameters
+    ----------
+    df             : Silver DataFrame to write. Must contain a 'date' column.
+    dataset        : Dataset name. Example: "tipo_de_cambio".
+    execution_date : Wall-clock time when the pipeline started — used for logging only.
+    """
+    execution_date_str = execution_date.strftime("%Y-%m-%d")
+
+    # Partition by business year and month of the data records.
+    df = df.copy()
+    df["year"] = df["date"].dt.year.astype(str)
+    df["month"] = df["date"].dt.month.astype(str).str.zfill(2)
+
+    partitions = df.groupby(["year", "month"])
+
+    for (year, month), partition_df in partitions:
+        # Drop helper columns before writing — year/month live in the S3 path.
+        partition_df = partition_df.drop(columns=["year", "month"])
+
+        s3_key = (
+            f"silver/source=banxico/"
+            f"dataset={dataset}/"
+            f"year={year}/"
+            f"month={month}/"
+            f"data.parquet"
+        )
+
+        buffer = io.BytesIO()
+        partition_df.to_parquet(
+            buffer, index=False, engine="pyarrow", compression="snappy"
+        )
+        buffer.seek(0)
+
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=buffer.getvalue(),
+            ContentType="application/octet-stream",
+        )
+
+        logger.info(
+            "Written Silver Parquet | dataset=%s | year=%s | month=%s | rows=%d",
+            dataset,
+            year,
+            month,
+            len(partition_df),
+        )
+
+    logger.info(
+        "Silver write complete | dataset=%s | execution_date=%s | partitions=%d | total_rows=%d",
+        dataset,
+        execution_date_str,
+        len(partitions),
+        len(df),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
+
 def process_dataset_to_silver(
     dataset: str,
-    mode: str,
     file_list: list[str],
     execution_date: datetime,
 ) -> None:
@@ -240,8 +324,8 @@ def process_dataset_to_silver(
         logger.warning("No data to write | dataset=%s", dataset)
         return
 
-    # TODO: write_silver_parquet(silver_df, dataset, execution_date)
-    # TODO: write_checkpoint(dataset, execution_date.strftime("%Y-%m-%d"))
+    write_silver_parquet(silver_df, dataset, execution_date)
+    write_checkpoint(dataset, execution_date.strftime("%Y-%m-%d"))
 
     logger.info(
         "Silver processing complete | dataset=%s | rows=%d",
@@ -250,7 +334,7 @@ def process_dataset_to_silver(
     )
 
 
-def run_silver(mode: str, start_date: str | None, execution_date: datetime) -> None:
+def run_silver(mode: str, execution_date: datetime) -> None:
     """
     Entry point for the Silver transformation step.
 
@@ -274,7 +358,7 @@ def run_silver(mode: str, start_date: str | None, execution_date: datetime) -> N
         else:
             checkpoint = read_checkpoint(dataset)
             after_date = checkpoint if checkpoint else "0000-00-00"
-            files      = list_bronze_files(dataset, mode, execution_date_str, after_date)
+            files = list_bronze_files(dataset, mode, execution_date_str, after_date)
 
         logger.info(
             "Files to process | dataset=%s | mode=%s | count=%d",
@@ -283,4 +367,4 @@ def run_silver(mode: str, start_date: str | None, execution_date: datetime) -> N
             len(files),
         )
 
-        process_dataset_to_silver(dataset, mode, files, execution_date)
+        process_dataset_to_silver(dataset, files, execution_date)
