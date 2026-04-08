@@ -135,3 +135,114 @@ resource "aws_iam_role_policy" "glue_s3_sns" {
     ]
   })
 }
+
+# ─── Glue Data Catalog ────────────────────────────────────────────────────────
+
+resource "aws_glue_catalog_database" "banxico" {
+  name        = "${var.project_name}-${var.environment}"
+  description = "Banxico financial data pipeline — medallion architecture"
+}
+
+# ─── Silver Tables ────────────────────────────────────────────────────────────
+
+locals {
+  silver_tables = {
+    tipo_de_cambio = "SF43718"
+    tiie_28        = "SF60648"
+    inpc           = "SP1"
+  }
+}
+
+resource "aws_glue_catalog_table" "silver" {
+  for_each      = local.silver_tables
+  database_name = aws_glue_catalog_database.banxico.name
+  name          = "silver_${each.key}"
+  description   = "Silver layer — ${each.key} (${each.value})"
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters = {
+    "classification"       = "parquet"
+    "compressionType"      = "snappy"
+    "EXTERNAL"             = "TRUE"
+    "parquet.compression"  = "SNAPPY"
+  }
+
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.data_lake.id}/silver/source=banxico/dataset=${each.key}/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+      parameters = {
+        "serialization.format" = "1"
+      }
+    }
+
+    columns {
+      name = "date"
+      type = "date"
+    }
+    columns {
+      name = "source"
+      type = "string"
+    }
+    columns {
+      name = "dataset"
+      type = "string"
+    }
+    columns {
+      name = "serie_id"
+      type = "string"
+    }
+    columns {
+      name = "processed_at"
+      type = "string"
+    }
+    columns {
+      name  = "value"
+      type  = "double"
+    }
+    columns {
+      name = "title"
+      type = "string"
+    }
+  }
+
+  partition_keys {
+    name = "year"
+    type = "string"
+  }
+
+  partition_keys {
+    name  = "month"
+    type  = "string"
+  }
+}
+
+# ─── Athena ───────────────────────────────────────────────────────────────────
+
+resource "aws_s3_object" "athena_results_prefix" {
+  bucket  = aws_s3_bucket.data_lake.id
+  key     = "athena-results/"
+  content = ""
+}
+
+resource "aws_athena_workgroup" "banxico" {
+  name        = "${var.project_name}-${var.environment}"
+  description = "Athena workgroup for Banxico pipeline queries"
+
+  configuration {
+    result_configuration {
+      output_location = "s3://${aws_s3_bucket.data_lake.id}/athena-results/"
+
+      encryption_configuration {
+        encryption_option = "SSE_S3"
+      }
+    }
+
+    enforce_workgroup_configuration    = true
+    publish_cloudwatch_metrics_enabled = true
+  }
+}
