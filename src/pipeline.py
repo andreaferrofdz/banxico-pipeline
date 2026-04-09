@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 
 from extract import run_extract
-from transform import run_silver  # , run_gold  # TODO: uncomment when implemented
+from transform import run_silver, run_gold
 
 # from quality import run_quality              # TODO: uncomment when implemented
 
@@ -92,19 +92,14 @@ def run_step_gold(mode: str, start_date: str | None, execution_date: datetime) -
     Reads Silver Parquet, applies business-level aggregations and joins
     across series, and writes the final dataset consumed by Tableau Public.
 
-    Not yet implemented — placeholder returns without action.
-
     Parameters
     ----------
     mode : str
         'daily' or 'backfill'.
-    start_date : str or None
-        Required when mode='backfill'. YYYY-MM-DD format.
     execution_date : datetime
         Wall-clock time when the pipeline started.
     """
-    # TODO: implement when gold.py is ready
-    pass
+    run_gold(mode, execution_date)
 
 
 def run_step_quality(
