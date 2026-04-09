@@ -162,10 +162,10 @@ resource "aws_glue_catalog_table" "silver" {
   table_type = "EXTERNAL_TABLE"
 
   parameters = {
-    "classification"       = "parquet"
-    "compressionType"      = "snappy"
-    "EXTERNAL"             = "TRUE"
-    "parquet.compression"  = "SNAPPY"
+    "classification"      = "parquet"
+    "compressionType"     = "snappy"
+    "EXTERNAL"            = "TRUE"
+    "parquet.compression" = "SNAPPY"
   }
 
   storage_descriptor {
@@ -201,8 +201,8 @@ resource "aws_glue_catalog_table" "silver" {
       type = "string"
     }
     columns {
-      name  = "value"
-      type  = "double"
+      name = "value"
+      type = "double"
     }
     columns {
       name = "title"
@@ -216,8 +216,8 @@ resource "aws_glue_catalog_table" "silver" {
   }
 
   partition_keys {
-    name  = "month"
-    type  = "string"
+    name = "month"
+    type = "string"
   }
 }
 
@@ -244,5 +244,79 @@ resource "aws_athena_workgroup" "banxico" {
 
     enforce_workgroup_configuration    = true
     publish_cloudwatch_metrics_enabled = true
+  }
+}
+
+resource "aws_glue_catalog_table" "gold" {
+  database_name = aws_glue_catalog_database.banxico.name
+  name          = "gold_macro_indicators"
+  description   = "Gold layer — monthly macro indicators (FX, TIIE 28, INPC)"
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters = {
+    "classification"      = "parquet"
+    "compressionType"     = "snappy"
+    "EXTERNAL"            = "TRUE"
+    "parquet.compression" = "SNAPPY"
+  }
+
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.data_lake.id}/gold/source=banxico/dataset=macro_indicators/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+      parameters = {
+        "serialization.format" = "1"
+      }
+    }
+
+    columns {
+      name = "date"
+      type = "date"
+    }
+    columns {
+      name = "fx_rate"
+      type = "double"
+    }
+    columns {
+      name = "fx_volatility"
+      type = "double"
+    }
+    columns {
+      name = "fx_mom_pct"
+      type = "double"
+    }
+    columns {
+      name = "tiie_28"
+      type = "double"
+    }
+    columns {
+      name = "tiie_mom_change"
+      type = "double"
+    }
+    columns {
+      name = "inpc"
+      type = "double"
+    }
+    columns {
+      name = "inpc_mom_pct"
+      type = "double"
+    }
+    columns {
+      name = "inpc_yoy_pct"
+      type = "double"
+    }
+    columns {
+      name = "processed_at"
+      type = "string"
+    }
+  }
+
+  partition_keys {
+    name = "execution_date"
+    type = "string"
   }
 }
