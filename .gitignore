@@ -26,3 +26,4 @@ data/*.parquet
 # OS
 .DS_Store
 data/
+data/exports/
