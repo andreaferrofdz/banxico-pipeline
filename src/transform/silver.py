@@ -248,7 +248,6 @@ def write_silver_parquet(
     """
     execution_date_str = execution_date.strftime("%Y-%m-%d")
 
-    # Partition by business year and month of the data records.
     df = df.copy()
     df["year"] = df["date"].dt.year.astype(str)
     df["month"] = df["date"].dt.month.astype(str).str.zfill(2)
