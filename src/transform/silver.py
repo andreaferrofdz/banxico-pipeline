@@ -48,6 +48,7 @@ SERIES = {
 # ---------------------------------------------------------------------------
 
 s3_client = boto3.client("s3", region_name=AWS_REGION)
+glue_client = boto3.client("glue", region_name=AWS_REGION)
 
 # ---------------------------------------------------------------------------
 # Extract helpers
@@ -222,6 +223,54 @@ def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
+def register_silver_partition(dataset: str, year: str, month: str) -> None:
+    """
+    Register a Silver partition in Glue Data Catalog after writing Parquet.
+
+    Eliminates the need for MSCK REPAIR TABLE or a Glue Crawler.
+    AlreadyExistsException is silently ignored — the call is idempotent
+    so re-running the pipeline for the same period is safe.
+
+    Parameters
+    ----------
+    dataset : Dataset name. Example: "tipo_de_cambio".
+    year    : Partition year as string. Example: "2024".
+    month   : Partition month as zero-padded string. Example: "01".
+    """
+    database_name = os.getenv("GLUE_DATABASE", "banxico-pipeline-dev")
+
+    try:
+        glue_client.create_partition(
+            DatabaseName=database_name,
+            TableName=f"silver_{dataset}",
+            PartitionInput={
+                "Values": [year, month],
+                "StorageDescriptor": {
+                    "Location": (
+                        f"s3://{BUCKET_NAME}/silver/source=banxico/"
+                        f"dataset={dataset}/year={year}/month={month}/"
+                    ),
+                    "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                    "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                    "SerdeInfo": {
+                        "SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                        "Parameters": {"serialization.format": "1"},
+                    },
+                },
+            },
+        )
+        logger.info(
+            "Partition registered | table=silver_%s | year=%s | month=%s",
+            dataset,
+            year,
+            month,
+        )
+
+    except glue_client.exceptions.AlreadyExistsException:
+        # Partition already registered — idempotent, safe to ignore.
+        pass
+
+
 def write_silver_parquet(
     df: pd.DataFrame,
     dataset: str,
@@ -254,15 +303,17 @@ def write_silver_parquet(
 
     partitions = df.groupby(["year", "month"])
 
-    schema = pa.schema([
-        pa.field("date",         pa.date32()),
-        pa.field("source",       pa.string()),
-        pa.field("dataset",      pa.string()),
-        pa.field("serie_id",     pa.string()),
-        pa.field("processed_at", pa.string()),
-        pa.field("value",        pa.float64()),
-        pa.field("title",        pa.string()),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("date", pa.date32()),
+            pa.field("source", pa.string()),
+            pa.field("dataset", pa.string()),
+            pa.field("serie_id", pa.string()),
+            pa.field("processed_at", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("title", pa.string()),
+        ]
+    )
 
     for (year, month), partition_df in partitions:
         partition_df = partition_df.drop(columns=["year", "month"])
@@ -290,6 +341,8 @@ def write_silver_parquet(
             Body=buffer.getvalue(),
             ContentType="application/octet-stream",
         )
+
+        register_silver_partition(dataset, str(year), str(month).zfill(2))
 
         logger.info(
             "Written Silver Parquet | dataset=%s | year=%s | month=%s | rows=%d",

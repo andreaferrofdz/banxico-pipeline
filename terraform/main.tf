@@ -131,6 +131,17 @@ resource "aws_iam_role_policy" "glue_s3_sns" {
         Effect   = "Allow"
         Action   = ["sns:Publish"]
         Resource = [aws_sns_topic.data_quality_alerts.arn]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:CreatePartition",
+          "glue:BatchCreatePartition",
+          "glue:GetTable",
+          "glue:GetDatabase",
+          "glue:GetPartition",
+        ]
+        Resource = ["*"]
       }
     ]
   })

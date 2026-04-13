@@ -70,17 +70,19 @@ logger = logging.getLogger("gold")
 # ---------------------------------------------------------------------------
 
 BUCKET_NAME = os.getenv("BUCKET_NAME", "banxico-pipeline-dev-datalake")
-AWS_REGION  = os.getenv("AWS_REGION",  "us-east-1")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # ---------------------------------------------------------------------------
 # AWS client
 # ---------------------------------------------------------------------------
 
 s3_client = boto3.client("s3", region_name=AWS_REGION)
+glue_client = boto3.client("glue", region_name=AWS_REGION)
 
 # ---------------------------------------------------------------------------
 # Silver readers
 # ---------------------------------------------------------------------------
+
 
 def read_silver_dataset(dataset: str) -> pd.DataFrame:
     """
@@ -99,9 +101,9 @@ def read_silver_dataset(dataset: str) -> pd.DataFrame:
         DataFrame indexed by date with Silver columns.
         Empty DataFrame if no Parquet files found.
     """
-    prefix   = f"silver/source=banxico/dataset={dataset}/"
+    prefix = f"silver/source=banxico/dataset={dataset}/"
     response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
-    keys     = [
+    keys = [
         obj["Key"]
         for obj in response.get("Contents", [])
         if obj["Key"].endswith(".parquet")
@@ -113,11 +115,11 @@ def read_silver_dataset(dataset: str) -> pd.DataFrame:
 
     dfs = []
     for key in keys:
-        obj    = s3_client.get_object(Bucket=BUCKET_NAME, Key=key)
+        obj = s3_client.get_object(Bucket=BUCKET_NAME, Key=key)
         buffer = io.BytesIO(obj["Body"].read())
         dfs.append(pd.read_parquet(buffer))
 
-    df         = pd.concat(dfs, ignore_index=True)
+    df = pd.concat(dfs, ignore_index=True)
     df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").set_index("date")
 
@@ -125,6 +127,7 @@ def read_silver_dataset(dataset: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
+
 
 def aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -139,7 +142,7 @@ def aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
     fx_mom_pct    : month-over-month change (%) — first month is NaN by design
     """
     monthly = df.groupby(pd.Grouper(freq="MS")).agg(
-        fx_rate      =("value", "mean"),
+        fx_rate=("value", "mean"),
         fx_volatility=("value", "std"),
     )
     monthly["fx_mom_pct"] = monthly["fx_rate"].pct_change() * 100
@@ -193,6 +196,7 @@ def aggregate_inpc(df: pd.DataFrame) -> pd.DataFrame:
 # Gold builder
 # ---------------------------------------------------------------------------
 
+
 def build_gold_dataframe(
     fx: pd.DataFrame,
     tiie: pd.DataFrame,
@@ -225,6 +229,49 @@ def build_gold_dataframe(
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
+def register_gold_partition(execution_date: str) -> None:
+    """
+    Register a Gold partition in Glue Data Catalog after writing Parquet.
+
+    Eliminates the need for MSCK REPAIR TABLE or a Glue Crawler.
+    AlreadyExistsException is silently ignored — the call is idempotent
+    so re-running the pipeline for the same execution_date is safe.
+
+    Parameters
+    ----------
+    execution_date : Pipeline run date in YYYY-MM-DD format.
+    """
+    database_name = os.getenv("GLUE_DATABASE", "banxico-pipeline-dev")
+
+    try:
+        glue_client.create_partition(
+            DatabaseName=database_name,
+            TableName="gold_macro_indicators",
+            PartitionInput={
+                "Values": [execution_date],
+                "StorageDescriptor": {
+                    "Location": (
+                        f"s3://{BUCKET_NAME}/gold/source=banxico/"
+                        f"dataset=macro_indicators/"
+                        f"execution_date={execution_date}/"
+                    ),
+                    "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                    "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                    "SerdeInfo": {
+                        "SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                        "Parameters": {"serialization.format": "1"},
+                    },
+                },
+            },
+        )
+        logger.info(
+            "Partition registered | table=gold_macro_indicators | execution_date=%s",
+            execution_date,
+        )
+
+    except glue_client.exceptions.AlreadyExistsException:
+        pass
+
 
 def write_gold_parquet(
     df: pd.DataFrame,
@@ -249,20 +296,22 @@ def write_gold_parquet(
     # Convert date index to Python date — required for pa.date32() compatibility with Athena.
     df["date"] = df["date"].dt.date
 
-    schema = pa.schema([
-        pa.field("date",            pa.date32()),
-        pa.field("fx_rate",         pa.float64()),
-        pa.field("fx_volatility",   pa.float64()),
-        pa.field("fx_mom_pct",      pa.float64()),
-        pa.field("tiie_28",         pa.float64()),
-        pa.field("tiie_mom_change", pa.float64()),
-        pa.field("inpc",            pa.float64()),
-        pa.field("inpc_mom_pct",    pa.float64()),
-        pa.field("inpc_yoy_pct",    pa.float64()),
-        pa.field("processed_at",    pa.string()),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("date", pa.date32()),
+            pa.field("fx_rate", pa.float64()),
+            pa.field("fx_volatility", pa.float64()),
+            pa.field("fx_mom_pct", pa.float64()),
+            pa.field("tiie_28", pa.float64()),
+            pa.field("tiie_mom_change", pa.float64()),
+            pa.field("inpc", pa.float64()),
+            pa.field("inpc_mom_pct", pa.float64()),
+            pa.field("inpc_yoy_pct", pa.float64()),
+            pa.field("processed_at", pa.string()),
+        ]
+    )
 
-    table  = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+    table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
     buffer = io.BytesIO()
     pq.write_table(table, buffer, compression="snappy")
     buffer.seek(0)
@@ -275,11 +324,13 @@ def write_gold_parquet(
     )
 
     s3_client.put_object(
-        Bucket      = BUCKET_NAME,
-        Key         = s3_key,
-        Body        = buffer.getvalue(),
-        ContentType = "application/octet-stream",
+        Bucket=BUCKET_NAME,
+        Key=s3_key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
     )
+
+    register_gold_partition(execution_date_str)
 
     logger.info(
         "Gold write complete | execution_date=%s | rows=%d",
@@ -291,6 +342,7 @@ def write_gold_parquet(
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
 
 def run_gold(mode: str, execution_date: datetime) -> None:
     """
@@ -308,9 +360,12 @@ def run_gold(mode: str, execution_date: datetime) -> None:
                      Gold ignores mode and always regenerates the full dataset.
     execution_date : Wall-clock time when the pipeline started.
     """
-    logger.info("Reading Silver datasets | execution_date=%s", execution_date.strftime("%Y-%m-%d"))
+    logger.info(
+        "Reading Silver datasets | execution_date=%s",
+        execution_date.strftime("%Y-%m-%d"),
+    )
 
-    fx_raw   = read_silver_dataset("tipo_de_cambio")
+    fx_raw = read_silver_dataset("tipo_de_cambio")
     tiie_raw = read_silver_dataset("tiie_28")
     inpc_raw = read_silver_dataset("inpc")
 
@@ -318,13 +373,14 @@ def run_gold(mode: str, execution_date: datetime) -> None:
         logger.error("One or more Silver datasets are empty — aborting Gold generation")
         raise RuntimeError("Cannot build Gold: one or more Silver datasets are empty")
 
-    fx_monthly   = aggregate_fx(fx_raw)
+    fx_monthly = aggregate_fx(fx_raw)
     tiie_monthly = aggregate_tiie(tiie_raw)
     inpc_monthly = aggregate_inpc(inpc_raw)
 
     gold = build_gold_dataframe(fx_monthly, tiie_monthly, inpc_monthly)
 
-    logger.info("Gold DataFrame built | rows=%d | %s → %s",
+    logger.info(
+        "Gold DataFrame built | rows=%d | %s → %s",
         len(gold),
         gold.index.min().date(),
         gold.index.max().date(),
