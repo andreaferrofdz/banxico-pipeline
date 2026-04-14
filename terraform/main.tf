@@ -149,6 +149,11 @@ resource "aws_iam_role_policy" "glue_s3_sns" {
         Resource = [aws_sns_topic.data_quality_alerts.arn]
       },
       {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:us-east-1:562453916048:parameter/banxico-pipeline/*"]
+      },
+      {
         Effect = "Allow"
         Action = [
           "glue:CreatePartition",
@@ -387,6 +392,13 @@ resource "aws_s3_object" "script_checkpoints" {
   etag   = filemd5("${path.module}/../src/checkpoints/checkpoints.py")
 }
 
+resource "aws_s3_object" "script_src_zip" {
+  bucket = aws_s3_bucket.data_lake.id
+  key    = "scripts/src.zip"
+  source = "${path.module}/../src.zip"
+  etag   = filemd5("${path.module}/../src.zip")
+}
+
 # ─── Glue Jobs ────────────────────────────────────────────────────────────────
 
 resource "aws_glue_job" "extract" {
@@ -397,18 +409,17 @@ resource "aws_glue_job" "extract" {
   command {
     name            = "pythonshell"
     python_version  = "3.9"
-    script_location = "s3://${aws_s3_bucket.data_lake.id}/scripts/pipeline.py"
+    script_location = "s3://${aws_s3_bucket.data_lake.id}/scripts/extract/banxico_api.py"
   }
 
   default_arguments = {
-    "--mode"                     = "daily"
-    "--BUCKET_NAME"              = aws_s3_bucket.data_lake.id
-    "--AWS_REGION"               = var.aws_region
-    "--GLUE_DATABASE"            = aws_glue_catalog_database.banxico.name
-    "--SNS_TOPIC_ARN"            = aws_sns_topic.data_quality_alerts.arn
-    "--extra-py-files"           = "s3://${aws_s3_bucket.data_lake.id}/scripts/extract/banxico_api.py,s3://${aws_s3_bucket.data_lake.id}/scripts/transform/silver.py,s3://${aws_s3_bucket.data_lake.id}/scripts/transform/gold.py,s3://${aws_s3_bucket.data_lake.id}/scripts/checkpoints/checkpoints.py"
+    "--mode"                      = "daily"
+    "--BUCKET_NAME"               = aws_s3_bucket.data_lake.id
+    "--AWS_REGION"                = var.aws_region
+    "--GLUE_DATABASE"             = aws_glue_catalog_database.banxico.name
+    "--SNS_TOPIC_ARN"             = aws_sns_topic.data_quality_alerts.arn
     "--additional-python-modules" = "requests,tenacity,pandas,pyarrow,python-dotenv"
-    "--enable-job-insights"      = "true"
+    "--enable-job-insights"       = "true"
   }
 
   max_capacity = 0.0625
@@ -431,12 +442,12 @@ resource "aws_glue_job" "silver" {
   }
 
   default_arguments = {
-    "--BUCKET_NAME"              = aws_s3_bucket.data_lake.id
-    "--AWS_REGION"               = var.aws_region
-    "--GLUE_DATABASE"            = aws_glue_catalog_database.banxico.name
-    "--extra-py-files"           = "s3://${aws_s3_bucket.data_lake.id}/scripts/checkpoints/checkpoints.py"
+    "--BUCKET_NAME"               = aws_s3_bucket.data_lake.id
+    "--AWS_REGION"                = var.aws_region
+    "--GLUE_DATABASE"             = aws_glue_catalog_database.banxico.name
+    "--extra-py-files"            = "s3://${aws_s3_bucket.data_lake.id}/scripts/checkpoints/checkpoints.py"
     "--additional-python-modules" = "pandas,pyarrow,python-dotenv"
-    "--enable-job-insights"      = "true"
+    "--enable-job-insights"       = "true"
   }
 
   max_capacity = 0.0625
@@ -455,11 +466,11 @@ resource "aws_glue_job" "gold" {
   }
 
   default_arguments = {
-    "--BUCKET_NAME"              = aws_s3_bucket.data_lake.id
-    "--AWS_REGION"               = var.aws_region
-    "--GLUE_DATABASE"            = aws_glue_catalog_database.banxico.name
+    "--BUCKET_NAME"               = aws_s3_bucket.data_lake.id
+    "--AWS_REGION"                = var.aws_region
+    "--GLUE_DATABASE"             = aws_glue_catalog_database.banxico.name
     "--additional-python-modules" = "pandas,pyarrow,python-dotenv"
-    "--enable-job-insights"      = "true"
+    "--enable-job-insights"       = "true"
   }
 
   max_capacity = 0.0625

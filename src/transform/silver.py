@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from typing import Optional
 
 import boto3
 import pandas as pd
@@ -59,7 +60,7 @@ def list_bronze_files(
     dataset: str,
     mode: str,
     execution_date: str,
-    after_date: str | None = None,
+    after_date: Optional[str] = None,
 ) -> list[str]:
     """
     List S3 keys for Bronze payloads of a given dataset and extraction type.
@@ -431,3 +432,8 @@ def run_silver(mode: str, execution_date: datetime) -> None:
         )
 
         process_dataset_to_silver(dataset, files, execution_date)
+
+if __name__ == "__main__":
+    from datetime import datetime, timezone
+    execution_date = datetime.now(tz=timezone.utc)
+    run_silver(mode="daily", execution_date=execution_date)

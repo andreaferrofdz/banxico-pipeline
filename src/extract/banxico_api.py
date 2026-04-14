@@ -71,6 +71,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 import boto3
 import requests
@@ -126,6 +127,34 @@ s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 def format_date(date: datetime) -> str:
     return date.strftime("%Y-%m-%d")
+
+
+def _get_banxico_token() -> str:
+    """
+    Retrieve Banxico API token from SSM Parameter Store in production,
+    or from environment variable in local development.
+
+    SSM is preferred in production — token never appears in logs or
+    Terraform state. Local development uses .env via python-dotenv.
+    """
+    # Local development — token from .env
+    token = os.getenv("BANXICO_TOKEN")
+    if token:
+        return token
+
+    # Production (Glue) — token from SSM Parameter Store
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        response = ssm.get_parameter(
+            Name="/banxico-pipeline/dev/banxico-token",
+            WithDecryption=True,
+        )
+        return response["Parameter"]["Value"]
+    except Exception as exc:
+        logger.warning(
+            "Could not retrieve token from SSM: %s — proceeding without token", exc
+        )
+        return ""
 
 
 def get_daily_window(data_month: datetime, lookback_days: int = 7) -> tuple[str, str]:
@@ -388,7 +417,7 @@ def upload_to_s3(payload: dict, s3_key: str) -> str:
 
 def extract_all(
     execution_date: datetime,
-    data_month: datetime | None = None,
+    data_month: Optional[datetime] = None,
     mode: str = "daily",
 ) -> list[str]:
     """
@@ -525,7 +554,7 @@ def run_backfill(start_date_str: str, execution_date: datetime) -> None:
 
 
 def run_extract(
-    mode: str, start_date: str | None, execution_date: datetime | None = None
+    mode: str, start_date: Optional[str], execution_date: Optional[datetime] = None
 ) -> None:
     """
     Public interface for pipeline orchestration.
@@ -579,9 +608,11 @@ if __name__ == "__main__":
         type=str,
         default=None,
     )
-    args = parser.parse_args()
 
-    try:
-        run_extract(mode=args.mode, start_date=args.start_date)
-    except ValueError as exc:
-        parser.error(str(exc))
+    args, _ = parser.parse_known_args()
+
+    if args.mode == "backfill" and not args.start_date:
+        parser.error("--start-date is required when --mode=backfill")
+
+    BANXICO_TOKEN = _get_banxico_token()
+    run_extract(mode=args.mode, start_date=args.start_date)

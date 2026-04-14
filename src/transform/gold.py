@@ -387,3 +387,9 @@ def run_gold(mode: str, execution_date: datetime) -> None:
     )
 
     write_gold_parquet(gold, execution_date)
+
+
+if __name__ == "__main__":
+    from datetime import datetime, timezone
+    execution_date = datetime.now(tz=timezone.utc)
+    run_gold(mode="daily", execution_date=execution_date)
