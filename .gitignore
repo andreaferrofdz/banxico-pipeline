@@ -27,3 +27,4 @@ data/*.parquet
 .DS_Store
 data/
 data/exports/
+src.zip
