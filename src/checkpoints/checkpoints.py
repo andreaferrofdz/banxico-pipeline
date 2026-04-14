@@ -30,6 +30,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Optional
 
 import boto3
 from dotenv import load_dotenv
@@ -84,7 +85,7 @@ def get_checkpoint_key(dataset: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def read_checkpoint(dataset: str) -> str | None:
+def read_checkpoint(dataset: str) -> Optional[str]:
     """
     Read the last successfully processed execution_date for a dataset.
 
