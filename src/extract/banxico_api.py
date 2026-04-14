@@ -125,7 +125,7 @@ s3_client = boto3.client("s3", region_name=AWS_REGION)
 # ---------------------------------------------------------------------------
 
 
-def format_date(date: datetime) -> str:
+def _format_date(date: datetime) -> str:
     return date.strftime("%Y-%m-%d")
 
 
@@ -165,7 +165,7 @@ def get_daily_window(data_month: datetime, lookback_days: int = 7) -> tuple[str,
     """
     end_date = data_month - timedelta(days=1)
     start_date = end_date - timedelta(days=lookback_days - 1)
-    return format_date(start_date), format_date(end_date)
+    return _format_date(start_date), _format_date(end_date)
 
 
 def get_full_month_window(data_month: datetime) -> tuple[str, str]:
@@ -183,7 +183,7 @@ def get_full_month_window(data_month: datetime) -> tuple[str, str]:
         last_of_month = data_month.replace(
             month=data_month.month + 1, day=1
         ) - timedelta(days=1)
-    return format_date(first_of_month), format_date(last_of_month)
+    return _format_date(first_of_month), _format_date(last_of_month)
 
 
 def get_last_closed_month_window(data_month: datetime) -> tuple[str, str]:
@@ -196,7 +196,7 @@ def get_last_closed_month_window(data_month: datetime) -> tuple[str, str]:
     first_of_current = data_month.replace(day=1)
     last_of_previous = first_of_current - timedelta(days=1)
     first_of_previous = last_of_previous.replace(day=1)
-    return format_date(first_of_previous), format_date(last_of_previous)
+    return _format_date(first_of_previous), _format_date(last_of_previous)
 
 
 def resolve_window(
@@ -283,7 +283,7 @@ def fetch_serie(serie_id: str, start_date: str, end_date: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def build_payload(
+def _build_payload(
     raw_data: dict,
     dataset: str,
     serie_id: str,
@@ -320,7 +320,7 @@ def build_payload(
 # ---------------------------------------------------------------------------
 
 
-def build_s3_key(
+def _build_s3_key(
     dataset: str,
     extraction_type: str,
     execution_date: str,
@@ -355,7 +355,7 @@ def build_s3_key(
     return base + "payload.json"
 
 
-def build_local_path(
+def _build_local_path(
     dataset: str,
     extraction_type: str,
     execution_date: str,
@@ -375,7 +375,7 @@ def build_local_path(
     return path / "payload.json"
 
 
-def save_local(payload: dict, local_path: Path) -> None:
+def _save_local(payload: dict, local_path: Path) -> None:
     """
     Persist payload as JSON to the local filesystem.
     Only called when SAVE_LOCAL=true — intended for local debugging only.
@@ -386,7 +386,7 @@ def save_local(payload: dict, local_path: Path) -> None:
     logger.info("Saved locally → %s", local_path)
 
 
-def upload_to_s3(payload: dict, s3_key: str) -> str:
+def _upload_to_s3(payload: dict, s3_key: str) -> str:
     """
     Serialize payload as UTF-8 JSON and upload directly to S3 from memory.
 
@@ -450,7 +450,7 @@ def extract_all(
     if data_month is None:
         data_month = execution_date
 
-    execution_date_str = format_date(execution_date)
+    execution_date_str = _format_date(execution_date)
     execution_ts_str = execution_date.strftime("%Y-%m-%dT%H:%M:%SZ")
     saved: list[str] = []
     errors: list[str] = []
@@ -463,7 +463,7 @@ def extract_all(
 
             raw_data = fetch_serie(serie_id, start_date, end_date)
 
-            payload = build_payload(
+            payload = _build_payload(
                 raw_data=raw_data,
                 dataset=dataset,
                 serie_id=serie_id,
@@ -474,16 +474,16 @@ def extract_all(
                 end_date=end_date,
             )
 
-            s3_key = build_s3_key(
+            s3_key = _build_s3_key(
                 dataset, mode, execution_date_str, start_date, end_date
             )
-            upload_to_s3(payload, s3_key)
+            _upload_to_s3(payload, s3_key)
 
             if SAVE_LOCAL:
-                local_path = build_local_path(
+                local_path = _build_local_path(
                     dataset, mode, execution_date_str, start_date, end_date
                 )
-                save_local(payload, local_path)
+                _save_local(payload, local_path)
 
             saved.append(dataset)
 
@@ -529,15 +529,15 @@ def run_backfill(start_date_str: str, execution_date: datetime) -> None:
 
     if start > end:
         raise ValueError(
-            f"start_date ({format_date(start)}) must be before yesterday ({format_date(end)}). "
+            f"start_date ({_format_date(start)}) must be before yesterday ({_format_date(end)}). "
             f"Cannot backfill future dates."
         )
 
-    logger.info("Starting backfill | %s → %s", format_date(start), format_date(end))
+    logger.info("Starting backfill | %s → %s", _format_date(start), _format_date(end))
 
     data_month = start.replace(day=1)
     while data_month <= end:
-        logger.info("Backfilling month: %s", format_date(data_month))
+        logger.info("Backfilling month: %s", _format_date(data_month))
 
         extract_all(
             execution_date=execution_date,

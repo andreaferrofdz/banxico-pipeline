@@ -84,7 +84,7 @@ glue_client = boto3.client("glue", region_name=AWS_REGION)
 # ---------------------------------------------------------------------------
 
 
-def read_silver_dataset(dataset: str) -> pd.DataFrame:
+def _read_silver_dataset(dataset: str) -> pd.DataFrame:
     """
     Read all Silver Parquet partitions for a given dataset from S3.
 
@@ -129,7 +129,7 @@ def read_silver_dataset(dataset: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
+def _aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate daily FX series to monthly frequency.
 
@@ -149,7 +149,7 @@ def aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
     return monthly
 
 
-def aggregate_tiie(df: pd.DataFrame) -> pd.DataFrame:
+def _aggregate_tiie(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate daily TIIE 28-day series to monthly frequency.
 
@@ -170,7 +170,7 @@ def aggregate_tiie(df: pd.DataFrame) -> pd.DataFrame:
     return monthly
 
 
-def aggregate_inpc(df: pd.DataFrame) -> pd.DataFrame:
+def _aggregate_inpc(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute derived inflation metrics from monthly INPC index.
 
@@ -197,7 +197,7 @@ def aggregate_inpc(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def build_gold_dataframe(
+def _build_gold_dataframe(
     fx: pd.DataFrame,
     tiie: pd.DataFrame,
     inpc: pd.DataFrame,
@@ -229,7 +229,7 @@ def build_gold_dataframe(
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
-def register_gold_partition(execution_date: str) -> None:
+def _register_gold_partition(execution_date: str) -> None:
     """
     Register a Gold partition in Glue Data Catalog after writing Parquet.
 
@@ -273,7 +273,7 @@ def register_gold_partition(execution_date: str) -> None:
         pass
 
 
-def write_gold_parquet(
+def _write_gold_parquet(
     df: pd.DataFrame,
     execution_date: datetime,
 ) -> None:
@@ -330,7 +330,7 @@ def write_gold_parquet(
         ContentType="application/octet-stream",
     )
 
-    register_gold_partition(execution_date_str)
+    _register_gold_partition(execution_date_str)
 
     logger.info(
         "Gold write complete | execution_date=%s | rows=%d",
@@ -365,19 +365,19 @@ def run_gold(mode: str, execution_date: datetime) -> None:
         execution_date.strftime("%Y-%m-%d"),
     )
 
-    fx_raw = read_silver_dataset("tipo_de_cambio")
-    tiie_raw = read_silver_dataset("tiie_28")
-    inpc_raw = read_silver_dataset("inpc")
+    fx_raw = _read_silver_dataset("tipo_de_cambio")
+    tiie_raw = _read_silver_dataset("tiie_28")
+    inpc_raw = _read_silver_dataset("inpc")
 
     if any(df.empty for df in [fx_raw, tiie_raw, inpc_raw]):
         logger.error("One or more Silver datasets are empty — aborting Gold generation")
         raise RuntimeError("Cannot build Gold: one or more Silver datasets are empty")
 
-    fx_monthly = aggregate_fx(fx_raw)
-    tiie_monthly = aggregate_tiie(tiie_raw)
-    inpc_monthly = aggregate_inpc(inpc_raw)
+    fx_monthly = _aggregate_fx(fx_raw)
+    tiie_monthly = _aggregate_tiie(tiie_raw)
+    inpc_monthly = _aggregate_inpc(inpc_raw)
 
-    gold = build_gold_dataframe(fx_monthly, tiie_monthly, inpc_monthly)
+    gold = _build_gold_dataframe(fx_monthly, tiie_monthly, inpc_monthly)
 
     logger.info(
         "Gold DataFrame built | rows=%d | %s → %s",
@@ -386,7 +386,7 @@ def run_gold(mode: str, execution_date: datetime) -> None:
         gold.index.max().date(),
     )
 
-    write_gold_parquet(gold, execution_date)
+    _write_gold_parquet(gold, execution_date)
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ glue_client = boto3.client("glue", region_name=AWS_REGION)
 # ---------------------------------------------------------------------------
 
 
-def list_bronze_files(
+def _list_bronze_files(
     dataset: str,
     mode: str,
     execution_date: str,
@@ -111,14 +111,14 @@ def list_bronze_files(
     return files
 
 
-def read_bronze_payload(s3_key: str) -> dict:
+def _read_bronze_payload(s3_key: str) -> dict:
     """Read a Bronze payload from S3 and return the full dict (metadata + data)."""
     response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
     content = response["Body"].read().decode("utf-8")
     return json.loads(content)
 
 
-def parse_bronze_records(payload: dict) -> pd.DataFrame:
+def _parse_bronze_records(payload: dict) -> pd.DataFrame:
     """
     Extract records from a Bronze payload into a raw DataFrame.
 
@@ -164,7 +164,7 @@ def parse_bronze_records(payload: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def transform(df: pd.DataFrame) -> pd.DataFrame:
+def _transform(df: pd.DataFrame) -> pd.DataFrame:
     """
     Apply all Silver transformations to a raw Bronze DataFrame.
 
@@ -192,7 +192,7 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
-def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
+def _build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
     """
     Read, parse and transform all Bronze files in file_list into a single DataFrame.
 
@@ -204,14 +204,14 @@ def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
     dfs = []
 
     for s3_key in file_list:
-        payload = read_bronze_payload(s3_key)
-        raw_df = parse_bronze_records(payload)
+        payload = _read_bronze_payload(s3_key)
+        raw_df = _parse_bronze_records(payload)
 
         if raw_df.empty:
             logger.warning("No data in payload | %s | skipping", s3_key)
             continue
 
-        dfs.append(transform(raw_df))
+        dfs.append(_transform(raw_df))
 
     if not dfs:
         return pd.DataFrame()
@@ -224,7 +224,7 @@ def build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
-def register_silver_partition(dataset: str, year: str, month: str) -> None:
+def _register_silver_partition(dataset: str, year: str, month: str) -> None:
     """
     Register a Silver partition in Glue Data Catalog after writing Parquet.
 
@@ -272,7 +272,7 @@ def register_silver_partition(dataset: str, year: str, month: str) -> None:
         pass
 
 
-def write_silver_parquet(
+def _write_silver_parquet(
     df: pd.DataFrame,
     dataset: str,
     execution_date: datetime,
@@ -343,7 +343,7 @@ def write_silver_parquet(
             ContentType="application/octet-stream",
         )
 
-        register_silver_partition(dataset, str(year), str(month).zfill(2))
+        _register_silver_partition(dataset, str(year), str(month).zfill(2))
 
         logger.info(
             "Written Silver Parquet | dataset=%s | year=%s | month=%s | rows=%d",
@@ -367,7 +367,7 @@ def write_silver_parquet(
 # ---------------------------------------------------------------------------
 
 
-def process_dataset_to_silver(
+def _process_dataset_to_silver(
     dataset: str,
     file_list: list[str],
     execution_date: datetime,
@@ -384,13 +384,13 @@ def process_dataset_to_silver(
     file_list      : S3 keys of Bronze files to process.
     execution_date : Wall-clock time when the pipeline started.
     """
-    silver_df = build_silver_dataframe(file_list)
+    silver_df = _build_silver_dataframe(file_list)
 
     if silver_df.empty:
         logger.warning("No data to write | dataset=%s", dataset)
         return
 
-    write_silver_parquet(silver_df, dataset, execution_date)
+    _write_silver_parquet(silver_df, dataset, execution_date)
     write_checkpoint(dataset, execution_date.strftime("%Y-%m-%d"))
 
     logger.info(
@@ -418,11 +418,11 @@ def run_silver(mode: str, execution_date: datetime) -> None:
 
     for dataset in SERIES:
         if mode == "backfill":
-            files = list_bronze_files(dataset, mode, execution_date_str)
+            files = _list_bronze_files(dataset, mode, execution_date_str)
         else:
             checkpoint = read_checkpoint(dataset)
             after_date = checkpoint if checkpoint else "0000-00-00"
-            files = list_bronze_files(dataset, mode, execution_date_str, after_date)
+            files = _list_bronze_files(dataset, mode, execution_date_str, after_date)
 
         logger.info(
             "Files to process | dataset=%s | mode=%s | count=%d",
@@ -431,7 +431,7 @@ def run_silver(mode: str, execution_date: datetime) -> None:
             len(files),
         )
 
-        process_dataset_to_silver(dataset, files, execution_date)
+        _process_dataset_to_silver(dataset, files, execution_date)
 
 if __name__ == "__main__":
     from datetime import datetime, timezone
