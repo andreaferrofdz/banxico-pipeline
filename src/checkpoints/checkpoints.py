@@ -1,29 +1,26 @@
-"""
-Checkpoint Store
-===================================
-Manages per-dataset processing state for the Silver layer.
+"""Checkpoint store for Silver layer incremental processing.
 
-Each dataset maintains an independent checkpoint in S3, storing the last
-execution_date successfully processed. This allows Silver to resume from
-where it left off without reprocessing already-transformed data.
+Manages per-dataset processing state stored in S3. Each dataset maintains
+an independent checkpoint storing the last execution_date successfully
+processed, allowing Silver to resume without reprocessing already-transformed data.
 
-Checkpoint structure
---------------------
-S3 path : silver/source=banxico/_checkpoints/<dataset>.json
-Content :
-  {
-    "dataset":                       "tipo_de_cambio",
-    "last_processed_execution_date": "2026-04-01",
-    "updated_at":                    "2026-04-01T08:05:01Z"
-  }
+Checkpoint structure:
+    S3 path: silver/source=banxico/_checkpoints/<dataset>.json
 
-Usage
------
-  from checkpoints import read_checkpoint, write_checkpoint, delete_checkpoint
+    Content::
 
-  last_run = read_checkpoint("tipo_de_cambio")   # None on first run
-  write_checkpoint("tipo_de_cambio", "2026-04-01")
-  delete_checkpoint("tipo_de_cambio")             # force full reprocessing
+        {
+          "dataset":                       "tipo_de_cambio",
+          "last_processed_execution_date": "2026-04-01",
+          "updated_at":                    "2026-04-01T08:05:01Z"
+        }
+
+Usage:
+    from checkpoints import read_checkpoint, write_checkpoint, delete_checkpoint
+
+    last_run = read_checkpoint("tipo_de_cambio")    # None on first run
+    write_checkpoint("tipo_de_cambio", "2026-04-01")
+    delete_checkpoint("tipo_de_cambio")             # force full reprocessing
 """
 
 import json
@@ -71,11 +68,16 @@ s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 
 def get_checkpoint_key(dataset: str) -> str:
-    """
-    Build the S3 key for a dataset's checkpoint file.
+    """Build the S3 key for a dataset's checkpoint file.
 
     Checkpoints live inside the Silver prefix so they are co-located
     with the data they describe and included in Silver-level access policies.
+
+    Args:
+        dataset: Dataset name. Example: "tipo_de_cambio".
+
+    Returns:
+        S3 object key string for the checkpoint JSON file.
     """
     return f"silver/source=banxico/_checkpoints/{dataset}.json"
 
@@ -86,20 +88,16 @@ def get_checkpoint_key(dataset: str) -> str:
 
 
 def read_checkpoint(dataset: str) -> Optional[str]:
-    """
-    Read the last successfully processed execution_date for a dataset.
+    """Read the last successfully processed execution_date for a dataset.
 
     Returns None on the first run when no checkpoint exists — Silver
     will process all available Bronze partitions in that case.
 
-    Parameters
-    ----------
-    dataset : str
-        Dataset name matching the Bronze partition key. Example: "tipo_de_cambio".
+    Args:
+        dataset: Dataset name matching the Bronze partition key.
+            Example: "tipo_de_cambio".
 
-    Returns
-    -------
-    str or None
+    Returns:
         Last processed execution_date in YYYY-MM-DD format, or None if
         no checkpoint exists.
     """
@@ -124,18 +122,15 @@ def read_checkpoint(dataset: str) -> Optional[str]:
 
 
 def write_checkpoint(dataset: str, execution_date: str) -> None:
-    """
-    Persist the last successfully processed execution_date for a dataset.
+    """Persist the last successfully processed execution_date for a dataset.
 
     Called by Silver after successfully transforming and uploading a dataset.
     Overwrites any existing checkpoint for the dataset.
 
-    Parameters
-    ----------
-    dataset : str
-        Dataset name matching the Bronze partition key. Example: "tipo_de_cambio".
-    execution_date : str
-        Last processed execution_date in YYYY-MM-DD format.
+    Args:
+        dataset: Dataset name matching the Bronze partition key.
+            Example: "tipo_de_cambio".
+        execution_date: Last processed execution_date in YYYY-MM-DD format.
     """
     s3_key = get_checkpoint_key(dataset)
 
@@ -158,16 +153,14 @@ def write_checkpoint(dataset: str, execution_date: str) -> None:
 
 
 def delete_checkpoint(dataset: str) -> None:
-    """
-    Delete the checkpoint for a dataset to force full reprocessing.
+    """Delete the checkpoint for a dataset to force full reprocessing.
 
     After deletion, the next Silver run will treat the dataset as a first
     run and process all available Bronze partitions from scratch.
 
-    Parameters
-    ----------
-    dataset : str
-        Dataset name matching the Bronze partition key. Example: "tipo_de_cambio".
+    Args:
+        dataset: Dataset name matching the Bronze partition key.
+            Example: "tipo_de_cambio".
     """
     s3_key = get_checkpoint_key(dataset)
     s3_client.delete_object(Bucket=BUCKET_NAME, Key=s3_key)
