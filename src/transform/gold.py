@@ -1,6 +1,5 @@
-"""
-Banxico SIE API — Gold Layer Aggregator
-=========================================
+"""Gold layer aggregator for Banxico macroeconomic data.
+
 Reads Silver Parquet datasets, aggregates to monthly frequency, joins the three
 series into a single macro indicators dataset and writes to S3 Gold layer.
 
@@ -8,33 +7,32 @@ Gold is always fully regenerated on every run — no incremental logic needed
 given the small dataset size (~40 rows). Each run writes a new partition keyed
 by execution_date for auditability.
 
-Partition structure
--------------------
-  gold/source=banxico/dataset=macro_indicators/execution_date=<YYYY-MM-DD>/data.parquet
+Partition structure:
+    gold/source=banxico/dataset=macro_indicators/execution_date=<YYYY-MM-DD>/data.parquet
 
-Gold schema
------------
-  date            : date    — month-start date
-  fx_rate         : float   — monthly average USD/MXN FIX exchange rate
-  fx_volatility   : float   — monthly std deviation of daily FX (exchange rate risk proxy)
-  fx_mom_pct      : float   — FX month-over-month change (%)
-  tiie_28         : float   — monthly average TIIE 28-day interbank rate
-  tiie_mom_change : float   — TIIE absolute change month-over-month (basis points)
-  inpc            : float   — INPC consumer price index value
-  inpc_mom_pct    : float   — monthly inflation (%)
-  inpc_yoy_pct    : float   — year-over-year inflation (%)
-  processed_at    : string  — UTC timestamp when Gold was written
+Gold schema:
+    date            : date   — month-start date
+    fx_rate         : float  — monthly average USD/MXN FIX exchange rate
+    fx_volatility   : float  — monthly std deviation of daily FX (exchange rate risk proxy)
+    fx_mom_pct      : float  — FX month-over-month change (%)
+    tiie_28         : float  — monthly average TIIE 28-day interbank rate
+    tiie_mom_change : float  — TIIE absolute change month-over-month (basis points)
+    inpc            : float  — INPC consumer price index value
+    inpc_mom_pct    : float  — monthly inflation (%)
+    inpc_yoy_pct    : float  — year-over-year inflation (%)
+    processed_at    : string — UTC timestamp when Gold was written
 
-Join strategy
--------------
-Inner join across all three series — only months where all three have data
-are included. INPC has a 2-month publication lag so the most recent months
-are excluded automatically.
+Join strategy:
+    Inner join across all three series — only months where all three have data
+    are included. INPC has a 2-month publication lag so the most recent months
+    are excluded automatically.
 
-NaN policy
-----------
-First-period NaN values (mom_pct, yoy_pct, yoy_pct) are preserved as null.
-Filling with 0 would imply no change, which is semantically incorrect.
+NaN policy:
+    First-period NaN values (mom_pct, yoy_pct) are preserved as null.
+    Filling with 0 would imply no change, which is semantically incorrect.
+
+Usage:
+    python gold.py  # runs daily mode with current UTC timestamp
 """
 
 import io
@@ -85,21 +83,17 @@ glue_client = boto3.client("glue", region_name=AWS_REGION)
 
 
 def _read_silver_dataset(dataset: str) -> pd.DataFrame:
-    """
-    Read all Silver Parquet partitions for a given dataset from S3.
+    """Read all Silver Parquet partitions for a given dataset from S3.
 
     Lists all year/month partitions and concatenates them into a single
     DataFrame indexed by date, sorted ascending.
 
-    Parameters
-    ----------
-    dataset : Silver dataset name. Example: "tipo_de_cambio".
+    Args:
+        dataset: Silver dataset name. Example: "tipo_de_cambio".
 
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame indexed by date with Silver columns.
-        Empty DataFrame if no Parquet files found.
+    Returns:
+        DataFrame indexed by date with Silver columns. Empty DataFrame
+        if no Parquet files found.
     """
     prefix = f"silver/source=banxico/dataset={dataset}/"
     response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
@@ -130,16 +124,15 @@ def _read_silver_dataset(dataset: str) -> pd.DataFrame:
 
 
 def _aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate daily FX series to monthly frequency.
+    """Aggregate daily FX series to monthly frequency.
 
-    df must be indexed by date (datetime).
+    Args:
+        df: Daily FX DataFrame indexed by date (datetime).
 
-    Metrics
-    -------
-    fx_rate       : monthly average USD/MXN
-    fx_volatility : monthly std deviation — proxy for exchange rate risk
-    fx_mom_pct    : month-over-month change (%) — first month is NaN by design
+    Returns:
+        Monthly DataFrame with columns: fx_rate (mean USD/MXN),
+        fx_volatility (std deviation — exchange rate risk proxy),
+        fx_mom_pct (month-over-month change %). First month is NaN by design.
     """
     monthly = df.groupby(pd.Grouper(freq="MS")).agg(
         fx_rate=("value", "mean"),
@@ -150,18 +143,17 @@ def _aggregate_fx(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _aggregate_tiie(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate daily TIIE 28-day series to monthly frequency.
+    """Aggregate daily TIIE 28-day series to monthly frequency.
 
-    df must be indexed by date (datetime).
-
-    Metrics
-    -------
-    tiie_28         : monthly average rate
-    tiie_mom_change : absolute change month-over-month — first month is NaN by design
-
-    Note: TIIE includes weekends with the same value as the preceding Friday.
+    TIIE includes weekends with the same value as the preceding Friday.
     Monthly averaging naturally smooths this out.
+
+    Args:
+        df: Daily TIIE DataFrame indexed by date (datetime).
+
+    Returns:
+        Monthly DataFrame with columns: tiie_28 (mean rate),
+        tiie_mom_change (absolute change month-over-month). First month is NaN by design.
     """
     monthly = df.groupby(pd.Grouper(freq="MS")).agg(
         tiie_28=("value", "mean"),
@@ -171,19 +163,18 @@ def _aggregate_tiie(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _aggregate_inpc(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute derived inflation metrics from monthly INPC index.
-
-    df must be indexed by date (datetime).
-
-    Metrics
-    -------
-    inpc         : raw index value
-    inpc_mom_pct : month-over-month inflation (%) — first month is NaN by design
-    inpc_yoy_pct : year-over-year inflation (%) — first 12 months are NaN by design
+    """Compute derived inflation metrics from monthly INPC index.
 
     INPC publication lag: Banxico publishes ~10-15 days after month-end.
     The 2 most recent months are typically unavailable and excluded via inner join.
+
+    Args:
+        df: Monthly INPC DataFrame indexed by date (datetime).
+
+    Returns:
+        Monthly DataFrame with columns: inpc (raw index), inpc_mom_pct
+        (month-over-month %), inpc_yoy_pct (year-over-year %).
+        First month NaN for mom, first 12 months NaN for yoy — by design.
     """
     monthly = df[["value"]].copy()
     monthly = monthly.rename(columns={"value": "inpc"})
@@ -202,8 +193,7 @@ def _build_gold_dataframe(
     tiie: pd.DataFrame,
     inpc: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Join the three monthly-aggregated series into a single Gold DataFrame.
+    """Join the three monthly-aggregated series into a single Gold DataFrame.
 
     Uses inner join so only months where all three series have data are included.
     INPC publication lag means the 2 most recent months are excluded automatically.
@@ -211,15 +201,12 @@ def _build_gold_dataframe(
     NaN values from first-period calculations are preserved — not filled with 0.
     A NaN month-over-month change is semantically different from a 0% change.
 
-    Parameters
-    ----------
-    fx   : Monthly FX DataFrame indexed by date.
-    tiie : Monthly TIIE DataFrame indexed by date.
-    inpc : Monthly INPC DataFrame indexed by date.
+    Args:
+        fx: Monthly FX DataFrame indexed by date.
+        tiie: Monthly TIIE DataFrame indexed by date.
+        inpc: Monthly INPC DataFrame indexed by date.
 
-    Returns
-    -------
-    pd.DataFrame
+    Returns:
         Unified Gold DataFrame indexed by date, sorted ascending.
     """
     df = fx.join(tiie, how="inner").join(inpc, how="inner")
@@ -230,16 +217,14 @@ def _build_gold_dataframe(
 # Storage
 # ---------------------------------------------------------------------------
 def _register_gold_partition(execution_date: str) -> None:
-    """
-    Register a Gold partition in Glue Data Catalog after writing Parquet.
+    """Register a Gold partition in Glue Data Catalog after writing Parquet.
 
     Eliminates the need for MSCK REPAIR TABLE or a Glue Crawler.
     AlreadyExistsException is silently ignored — the call is idempotent
     so re-running the pipeline for the same execution_date is safe.
 
-    Parameters
-    ----------
-    execution_date : Pipeline run date in YYYY-MM-DD format.
+    Args:
+        execution_date: Pipeline run date in YYYY-MM-DD format.
     """
     database_name = os.getenv("GLUE_DATABASE", "banxico-pipeline-dev")
 
@@ -277,16 +262,14 @@ def _write_gold_parquet(
     df: pd.DataFrame,
     execution_date: datetime,
 ) -> None:
-    """
-    Write the Gold DataFrame to S3 as Parquet, partitioned by execution_date.
+    """Write the Gold DataFrame to S3 as Parquet, partitioned by execution_date.
 
     Each pipeline run writes a new partition — preserves full audit history
     without over-partitioning by business date given the small dataset size.
 
-    Parameters
-    ----------
-    df             : Gold DataFrame indexed by date. Must match Gold schema.
-    execution_date : Wall-clock time when the pipeline started.
+    Args:
+        df: Gold DataFrame indexed by date. Must match Gold schema.
+        execution_date: Wall-clock time when the pipeline started.
     """
     execution_date_str = execution_date.strftime("%Y-%m-%d")
 
@@ -345,8 +328,7 @@ def _write_gold_parquet(
 
 
 def run_gold(mode: str, execution_date: datetime) -> None:
-    """
-    Entry point for the Gold aggregation step.
+    """Entry point for the Gold aggregation step.
 
     Reads all Silver datasets, aggregates to monthly frequency, joins into
     a single macro indicators dataset and writes to S3 Gold layer.
@@ -354,11 +336,10 @@ def run_gold(mode: str, execution_date: datetime) -> None:
     Gold is always fully regenerated regardless of mode — the dataset is small
     (~40 rows) and aggregation is fast. No incremental logic needed.
 
-    Parameters
-    ----------
-    mode           : "daily" or "backfill" — passed by pipeline for consistency.
-                     Gold ignores mode and always regenerates the full dataset.
-    execution_date : Wall-clock time when the pipeline started.
+    Args:
+        mode: "daily" or "backfill" — passed by pipeline for consistency.
+            Gold ignores mode and always regenerates the full dataset.
+        execution_date: Wall-clock time when the pipeline started.
     """
     logger.info(
         "Reading Silver datasets | execution_date=%s",
@@ -390,6 +371,5 @@ def run_gold(mode: str, execution_date: datetime) -> None:
 
 
 if __name__ == "__main__":
-    from datetime import datetime, timezone
     execution_date = datetime.now(tz=timezone.utc)
     run_gold(mode="daily", execution_date=execution_date)
