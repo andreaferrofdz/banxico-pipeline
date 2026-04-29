@@ -1,6 +1,5 @@
-"""
-Banxico Data Pipeline — Orchestrator
-======================================
+"""Banxico data pipeline orchestrator.
+
 Coordinates the full pipeline execution: extract → silver → gold → quality.
 
 Steps run sequentially. If any step raises an exception the pipeline stops
@@ -10,21 +9,19 @@ as failed and SNS triggers the alert.
 execution_date is created once and passed to all steps so S3 partition keys
 are consistent across Bronze, Silver and Gold within a single pipeline run.
 
-Usage
------
-Daily   : python3 src/pipeline.py
-Backfill: python3 src/pipeline.py --mode backfill --start-date 2023-01-01
+Usage:
+    python pipeline.py
+    python pipeline.py --mode backfill --start-date 2023-01-01
 """
 
 import argparse
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from extract import run_extract
 from transform import run_silver, run_gold
-
-# from quality import run_quality              # TODO: uncomment when implemented
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -43,70 +40,58 @@ logger = logging.getLogger("pipeline_orchestration")
 
 
 def run_step_extract(
-    mode: str, start_date: str | None, execution_date: datetime
+    mode: str, start_date: Optional[str], execution_date: datetime
 ) -> None:
-    """
-    Execute the Bronze extraction step.
+    """Execute the Bronze extraction step.
 
     Calls run_extract which routes to daily or backfill logic based on mode.
     If this step fails the pipeline stops — downstream steps depend on Bronze data.
 
-    Parameters
-    ----------
-    mode : str
-        'daily' or 'backfill'.
-    start_date : str or None
-        Required when mode='backfill'. YYYY-MM-DD format.
-    execution_date : datetime
-        Wall-clock time when the pipeline started. Shared across all steps
-        so Bronze, Silver and Gold partitions are consistent within a run.
+    Args:
+        mode: Extraction mode — "daily" or "backfill".
+        start_date: Required when mode="backfill". YYYY-MM-DD format.
+        execution_date: Wall-clock time when the pipeline started. Shared across
+            all steps so Bronze, Silver and Gold partitions are consistent.
     """
     run_extract(mode, start_date, execution_date)
 
 
 def run_step_silver(
-    mode: str, start_date: str | None, execution_date: datetime
+    mode: str, start_date: Optional[str], execution_date: datetime
 ) -> None:
-    """
-    Execute the Silver transformation step.
+    """Execute the Silver transformation step.
 
     Reads Bronze JSON payloads, applies cleaning and type casting,
     deduplicates by (serie_id, date), and writes Parquet to Silver.
 
-    Parameters
-    ----------
-    mode : str
-        'daily' or 'backfill'.
-    start_date : str or None
-        Required when mode='backfill'. YYYY-MM-DD format.
-    execution_date : datetime
-        Wall-clock time when the pipeline started.
+    Args:
+        mode: Extraction mode — "daily" or "backfill".
+        start_date: Required when mode="backfill". YYYY-MM-DD format.
+        execution_date: Wall-clock time when the pipeline started.
     """
     run_silver(mode, execution_date)
 
 
-def run_step_gold(mode: str, start_date: str | None, execution_date: datetime) -> None:
-    """
-    Execute the Gold aggregation step.
+def run_step_gold(
+    mode: str, start_date: Optional[str], execution_date: datetime
+) -> None:
+    """Execute the Gold aggregation step.
 
     Reads Silver Parquet, applies business-level aggregations and joins
     across series, and writes the final dataset consumed by Tableau Public.
 
-    Parameters
-    ----------
-    mode : str
-        'daily' or 'backfill'.
-    execution_date : datetime
-        Wall-clock time when the pipeline started.
+    Args:
+        mode: Extraction mode — "daily" or "backfill".
+        start_date: Required when mode="backfill". YYYY-MM-DD format.
+        execution_date: Wall-clock time when the pipeline started.
     """
     run_gold(mode, execution_date)
 
 
 def run_step_quality(
-    mode: str, start_date: str | None, execution_date: datetime
+    mode: str, start_date: Optional[str], execution_date: datetime
 ) -> None:
-    """
-    Execute the data quality validation step.
+    """Execute the data quality validation step.
 
     Runs Great Expectations suite against the Gold layer and publishes
     an SNS alert if any expectation fails. Runs last because Gold is
@@ -114,14 +99,10 @@ def run_step_quality(
 
     Not yet implemented — placeholder returns without action.
 
-    Parameters
-    ----------
-    mode : str
-        'daily' or 'backfill'.
-    start_date : str or None
-        Required when mode='backfill'. YYYY-MM-DD format.
-    execution_date : datetime
-        Wall-clock time when the pipeline started.
+    Args:
+        mode: Extraction mode — "daily" or "backfill".
+        start_date: Required when mode="backfill". YYYY-MM-DD format.
+        execution_date: Wall-clock time when the pipeline started.
     """
     # TODO: implement when quality.py is ready
     pass
@@ -132,9 +113,10 @@ def run_step_quality(
 # ---------------------------------------------------------------------------
 
 
-def run_pipeline(mode: str, start_date: str | None, execution_date: datetime) -> None:
-    """
-    Orchestrate the full Banxico pipeline: extract → silver → gold → quality.
+def run_pipeline(
+    mode: str, start_date: Optional[str], execution_date: datetime
+) -> None:
+    """Orchestrate the full Banxico pipeline: extract → silver → gold → quality.
 
     Steps run sequentially. Logging and timing are centralized in the loop —
     step functions contain only business logic. If any step raises an exception
@@ -145,16 +127,11 @@ def run_pipeline(mode: str, start_date: str | None, execution_date: datetime) ->
     so S3 partition keys are consistent across Bronze, Silver and Gold
     within a single pipeline run.
 
-    Parameters
-    ----------
-    mode : str
-        'daily'    — extracts rolling window, processes latest data.
-        'backfill' — iterates month by month from start_date to yesterday.
-    start_date : str or None
-        Required when mode='backfill'. YYYY-MM-DD format.
-    execution_date : datetime
-        Wall-clock time when the pipeline started. Created once in __main__
-        and shared across all steps.
+    Args:
+        mode: Extraction mode — "daily" or "backfill".
+        start_date: Required when mode="backfill". YYYY-MM-DD format.
+        execution_date: Wall-clock time when the pipeline started. Created once
+            in __main__ and shared across all steps.
     """
     logger.info(
         "Pipeline started | mode=%s | start_date=%s",
