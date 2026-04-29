@@ -1,3 +1,27 @@
+"""Silver layer transformation pipeline for Banxico macroeconomic data.
+
+Reads raw JSON payloads from the Bronze layer in S3, applies schema normalization
+and type casting, and writes partitioned Parquet files to the Silver layer.
+
+Supports two execution modes:
+    - daily: incremental processing using per-dataset checkpoints.
+    - backfill: full reprocess of a specific execution_date partition.
+
+Bronze → Silver transformations applied:
+    - Banxico date format (dd/mm/yyyy) parsed to date32.
+    - String values cast to float64 — N/E sentinel → NaN.
+    - Title whitespace normalized (strip + collapse).
+    - Columns renamed to final Silver schema.
+
+Output partition structure:
+    s3://<bucket>/silver/source=banxico/dataset=<name>/year=<YYYY>/month=<MM>/data.parquet
+
+Glue Data Catalog partitions are registered programmatically after each write —
+no MSCK REPAIR TABLE or Glue Crawler required.
+
+Usage:
+    python silver.py  # runs daily mode with current UTC timestamp
+"""
 import io
 import json
 import logging
@@ -62,8 +86,7 @@ def _list_bronze_files(
     execution_date: str,
     after_date: Optional[str] = None,
 ) -> list[str]:
-    """
-    List S3 keys for Bronze payloads of a given dataset and extraction type.
+    """List S3 keys for Bronze payloads of a given dataset and extraction type.
 
     Backfill: scopes to exact execution_date partition — lists all range sub-partitions
     within that single backfill run.
@@ -73,13 +96,15 @@ def _list_bronze_files(
 
     Paginates automatically for buckets with >1000 objects.
 
-    Parameters
-    ----------
-    dataset        : Bronze dataset name. Example: "tipo_de_cambio".
-    mode           : "daily" or "backfill".
-    execution_date : YYYY-MM-DD string of the pipeline run date.
-    after_date     : YYYY-MM-DD checkpoint date for daily mode. Pass "0000-00-00"
-                     to return all files (first run). Ignored in backfill mode.
+    Args:
+        dataset: Bronze dataset name. Example: "tipo_de_cambio".
+        mode: Extraction mode — "daily" or "backfill".
+        execution_date: YYYY-MM-DD string of the pipeline run date.
+        after_date: YYYY-MM-DD checkpoint date for daily mode. Pass "0000-00-00"
+            to return all files (first run). Ignored in backfill mode.
+
+    Returns:
+        List of S3 keys matching the given prefix and mode filters.
     """
     base = f"bronze/source=banxico/dataset={dataset}/extraction_type={mode}"
 
@@ -112,21 +137,31 @@ def _list_bronze_files(
 
 
 def _read_bronze_payload(s3_key: str) -> dict:
-    """Read a Bronze payload from S3 and return the full dict (metadata + data)."""
+    """Read a Bronze payload from S3 and return the full dict (metadata + data).
+
+    Args:
+        s3_key: Full S3 object key of the Bronze JSON file.
+
+    Returns:
+        Parsed JSON payload as a dictionary with keys 'metadata' and 'data'.
+    """
     response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
     content = response["Body"].read().decode("utf-8")
     return json.loads(content)
 
 
 def _parse_bronze_records(payload: dict) -> pd.DataFrame:
-    """
-    Extract records from a Bronze payload into a raw DataFrame.
+    """Extract records from a Bronze payload into a raw DataFrame.
 
     Adds metadata columns (source, dataset, serie_id, processed_at) so each
     row is self-describing without needing the S3 path for context.
 
-    Returns an empty DataFrame if the payload contains no data — caller
-    decides whether to skip or raise.
+    Args:
+        payload: Parsed Bronze JSON dict with keys 'metadata' and 'data'.
+
+    Returns:
+        Raw DataFrame with columns: fecha, dato, titulo, source, dataset,
+        serie_id, processed_at. Empty DataFrame if the payload contains no data.
     """
     series = payload.get("data", {}).get("bmx", {}).get("series", [])
     metadata = payload.get("metadata", {})
@@ -165,13 +200,19 @@ def _parse_bronze_records(payload: dict) -> pd.DataFrame:
 
 
 def _transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply all Silver transformations to a raw Bronze DataFrame.
+    """Apply all Silver transformations to a raw Bronze DataFrame.
 
-    - Parses Banxico date format (dd/mm/yyyy) to datetime64
-    - Casts value strings to float64 — N/E → NaN via errors="coerce"
-    - Normalizes title whitespace (strip + collapse internal spaces)
-    - Renames columns to final Silver schema
+    - Parses Banxico date format (dd/mm/yyyy) to datetime64.
+    - Casts value strings to float64 — N/E → NaN via errors='coerce'.
+    - Normalizes title whitespace (strip + collapse internal spaces).
+    - Renames columns to final Silver schema.
+
+    Args:
+        df: Raw Bronze DataFrame as returned by _parse_bronze_records.
+
+    Returns:
+        Transformed DataFrame with columns: date, source, dataset, serie_id,
+        processed_at, value, title.
     """
     df = df.copy()
 
@@ -193,13 +234,17 @@ def _transform(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
-    """
-    Read, parse and transform all Bronze files in file_list into a single DataFrame.
+    """Read, parse and transform all Bronze files into a single Silver DataFrame.
 
     Skips empty payloads with a warning. Deduplicates by (serie_id, date) keeping
     the latest processed_at — handles overlaps from daily rolling windows.
 
-    Returns an empty DataFrame if all payloads are empty or file_list is empty.
+    Args:
+        file_list: S3 keys of Bronze JSON files to process.
+
+    Returns:
+        Consolidated Silver DataFrame sorted by date. Empty DataFrame if all
+        payloads are empty or file_list is empty.
     """
     dfs = []
 
@@ -225,18 +270,16 @@ def _build_silver_dataframe(file_list: list[str]) -> pd.DataFrame:
 
 
 def _register_silver_partition(dataset: str, year: str, month: str) -> None:
-    """
-    Register a Silver partition in Glue Data Catalog after writing Parquet.
+    """Register a Silver partition in Glue Data Catalog after writing Parquet.
 
     Eliminates the need for MSCK REPAIR TABLE or a Glue Crawler.
     AlreadyExistsException is silently ignored — the call is idempotent
     so re-running the pipeline for the same period is safe.
 
-    Parameters
-    ----------
-    dataset : Dataset name. Example: "tipo_de_cambio".
-    year    : Partition year as string. Example: "2024".
-    month   : Partition month as zero-padded string. Example: "01".
+    Args:
+        dataset: Dataset name. Example: "tipo_de_cambio".
+        year: Partition year as string. Example: "2024".
+        month: Partition month as zero-padded string. Example: "01".
     """
     database_name = os.getenv("GLUE_DATABASE", "banxico-pipeline-dev")
 
@@ -277,8 +320,7 @@ def _write_silver_parquet(
     dataset: str,
     execution_date: datetime,
 ) -> None:
-    """
-    Write a Silver DataFrame to S3 as Parquet, partitioned by year and month of the data.
+    """Write a Silver DataFrame to S3 as Parquet, partitioned by year and month of the data.
 
     Partitions by business date (year/month of the data records), not by pipeline
     execution_date — Silver partitions represent when the data occurred, not when
@@ -290,11 +332,10 @@ def _write_silver_parquet(
     Partition structure:
         silver/source=banxico/dataset=<name>/year=<YYYY>/month=<MM>/data.parquet
 
-    Parameters
-    ----------
-    df             : Silver DataFrame to write. Must contain a 'date' column.
-    dataset        : Dataset name. Example: "tipo_de_cambio".
-    execution_date : Wall-clock time when the pipeline started — used for logging only.
+    Args:
+        df: Silver DataFrame to write. Must contain a 'date' column.
+        dataset: Dataset name. Example: "tipo_de_cambio".
+        execution_date: Wall-clock time when the pipeline started — used for logging only.
     """
     execution_date_str = execution_date.strftime("%Y-%m-%d")
 
@@ -343,7 +384,7 @@ def _write_silver_parquet(
             ContentType="application/octet-stream",
         )
 
-        _register_silver_partition(dataset, str(year), str(month).zfill(2))
+        _register_silver_partition(dataset, str(year), str(month))
 
         logger.info(
             "Written Silver Parquet | dataset=%s | year=%s | month=%s | rows=%d",
@@ -372,17 +413,15 @@ def _process_dataset_to_silver(
     file_list: list[str],
     execution_date: datetime,
 ) -> None:
-    """
-    Orchestrate Silver processing for a single dataset.
+    """Orchestrate Silver processing for a single dataset.
 
     Reads all Bronze files in file_list, transforms them, and writes the
     result to Silver. Updates the checkpoint after a successful write.
 
-    Parameters
-    ----------
-    dataset        : Dataset name. Example: "tipo_de_cambio".
-    file_list      : S3 keys of Bronze files to process.
-    execution_date : Wall-clock time when the pipeline started.
+    Args:
+        dataset: Dataset name. Example: "tipo_de_cambio".
+        file_list: S3 keys of Bronze files to process.
+        execution_date: Wall-clock time when the pipeline started.
     """
     silver_df = _build_silver_dataframe(file_list)
 
@@ -401,18 +440,16 @@ def _process_dataset_to_silver(
 
 
 def run_silver(mode: str, execution_date: datetime) -> None:
-    """
-    Entry point for the Silver transformation step.
+    """Entry point for the Silver transformation step.
 
-    Daily mode   : reads checkpoint per dataset to process only new Bronze files.
-                   If no checkpoint exists (first run), processes all available files.
+    Daily mode: reads checkpoint per dataset to process only new Bronze files.
+        If no checkpoint exists (first run), processes all available files.
     Backfill mode: processes all Bronze files for the exact execution_date of this run.
-                   Checkpoint is not read or updated — backfill is an explicit reprocess.
+        Checkpoint is not read or updated — backfill is an explicit reprocess.
 
-    Parameters
-    ----------
-    mode           : "daily" or "backfill".
-    execution_date : Wall-clock time when the pipeline started.
+    Args:
+        mode: Extraction mode — "daily" or "backfill".
+        execution_date: Wall-clock time when the pipeline started.
     """
     execution_date_str = execution_date.strftime("%Y-%m-%d")
 
@@ -434,6 +471,5 @@ def run_silver(mode: str, execution_date: datetime) -> None:
         _process_dataset_to_silver(dataset, files, execution_date)
 
 if __name__ == "__main__":
-    from datetime import datetime, timezone
     execution_date = datetime.now(tz=timezone.utc)
     run_silver(mode="daily", execution_date=execution_date)
